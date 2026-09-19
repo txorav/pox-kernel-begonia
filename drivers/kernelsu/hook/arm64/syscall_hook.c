@@ -147,8 +147,17 @@ static int __init ksu_find_ni_syscall_slots(int *out_slots, int max_slots)
 // Unified dispatcher: reads original NR from x8/orig_ax, dispatches to handler.
 // Validates that syscallno matches our dispatcher slot (i.e. we redirected it),
 // otherwise it's a spurious call — return -ENOSYS.
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 0)
 static long __nocfi ksu_syscall_dispatcher(const struct pt_regs *regs)
+#else
+static long __nocfi ksu_syscall_dispatcher(unsigned long a0, unsigned long a1,
+                                           unsigned long a2, unsigned long a3,
+                                           unsigned long a4, unsigned long a5)
+#endif
 {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 19, 0)
+    struct pt_regs *regs = task_pt_regs(current);
+#endif
     if (regs->syscallno != ksu_dispatcher_nr)
         return -ENOSYS;
 

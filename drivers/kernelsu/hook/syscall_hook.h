@@ -1,14 +1,26 @@
 #ifndef __KSU_H_KSU_SYSCALL_HOOK
 #define __KSU_H_KSU_SYSCALL_HOOK
 #include <asm/syscall.h>
+#include <linux/version.h>
 
 #if defined(__x86_64__)
 typedef sys_call_ptr_t syscall_fn_t;
-#else
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 0)
 typedef asmlinkage long (*syscall_fn_t)(const struct pt_regs *regs);
+#else
+typedef void *syscall_fn_t;
 #endif
 
 extern syscall_fn_t *ksu_syscall_table;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 0) || defined(__x86_64__)
+#define ksu_call_original_syscall(nr, regs) (((asmlinkage long (*)(const struct pt_regs *))ksu_syscall_table[(nr)])((regs)))
+#else
+#define ksu_call_original_syscall(nr, regs) \
+    (((asmlinkage long (*)(unsigned long, unsigned long, unsigned long, unsigned long, unsigned long, unsigned long)) \
+      ksu_syscall_table[(nr)])((regs)->regs[0], (regs)->regs[1], (regs)->regs[2], \
+                               (regs)->regs[3], (regs)->regs[4], (regs)->regs[5]))
+#endif
 
 // Dispatcher slot number in syscall table
 extern int ksu_dispatcher_nr;
