@@ -91,6 +91,15 @@ static bool is_ksud_exists()
 	return true;
 }
 
+static inline bool is_dex_or_jar(const char *path)
+{
+	int len = strlen(path);
+	if (len > 4 && (!strcmp(path + len - 4, ".jar") || !strcmp(path + len - 4, ".dex"))) {
+		return true;
+	}
+	return false;
+}
+
 long ksu_handle_faccessat_sucompat(int orig_nr, struct pt_regs *regs)
 {
 	const char __user **filename_user, *orig_filename;
@@ -102,6 +111,18 @@ long ksu_handle_faccessat_sucompat(int orig_nr, struct pt_regs *regs)
 	}
 
 	filename_user = (const char __user **)&PT_REGS_PARM2(regs);
+
+	int mode = (int)PT_REGS_PARM3(regs);
+	if (mode & 2) {
+		char path_buf[128];
+		memset(path_buf, 0, sizeof(path_buf));
+		if (strncpy_from_user_nofault(path_buf, (const void __user *)untagged_addr((unsigned long)*filename_user), sizeof(path_buf) - 1) > 0) {
+			if (is_dex_or_jar(path_buf)) {
+				pr_info("faccessat W_OK denied for dex/jar: %s\n", path_buf);
+				return -EACCES;
+			}
+		}
+	}
 
 	char path[sizeof(su_path) + 1];
 	memset(path, 0, sizeof(path));

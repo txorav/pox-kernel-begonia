@@ -1401,6 +1401,8 @@ static irqreturn_t nvt_ts_work_func(int irq, void *data)
 	int32_t finger_cnt = 0;
 
 	if (unlikely(!ts_prio_boosted)) {
+		struct sched_param param = { .sched_priority = 98 };
+		sched_setscheduler_nocheck(current, SCHED_FIFO, &param);
 		set_user_nice(current, -20);
 		ts_prio_boosted = true;
 	}
@@ -1937,6 +1939,26 @@ static int nvt_set_cur_value(int nvt_mode, int nvt_value)
 
 	switch (nvt_mode) {
 	case Touch_Game_Mode:
+			temp_value = xiaomi_touch_interfaces.touch_mode[Touch_Game_Mode][SET_CUR_VALUE];
+			if (temp_value) {
+				uint8_t sub_cmd[2];
+				/* Engage peak touch sensitivity (0x71, 2) */
+				sub_cmd[0] = 0x71;
+				sub_cmd[1] = 2;
+				nvt_touchfeature_set(sub_cmd);
+				/* Engage minimum tolerance / zero debounce latency (0x70, 2) */
+				nvt_game_value[0] = 0x70;
+				nvt_game_value[1] = 2;
+			} else {
+				uint8_t sub_cmd[2];
+				/* Reset to default sensitivity */
+				sub_cmd[0] = 0x71;
+				sub_cmd[1] = 0;
+				nvt_touchfeature_set(sub_cmd);
+				/* Reset to default tolerance */
+				nvt_game_value[0] = 0x70;
+				nvt_game_value[1] = 0;
+			}
 			break;
 	case Touch_Active_MODE:
 			break;

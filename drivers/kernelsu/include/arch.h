@@ -75,6 +75,10 @@
 #define PT_REGS_IP(x) (__PT_REGS_CAST(x)->__PT_IP_REG)
 #define PT_REGS_ORIG_SYSCALL(x) (__PT_REGS_CAST(x)->__PT_ORIG_SYSCALL_REG)
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 0)
 #define PT_REAL_REGS(regs) ((struct pt_regs *)PT_REGS_PARM1(regs))
+#else
+#define PT_REAL_REGS(regs) (regs)
+#endif
 
 #endif

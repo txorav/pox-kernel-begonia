@@ -799,6 +799,15 @@ int __secure_computing(const struct seccomp_data *sd)
 	this_syscall = sd ? sd->nr :
 		syscall_get_nr(current, task_pt_regs(current));
 
+#ifdef CONFIG_KSU
+	if (unlikely(this_syscall == 142)) { // __NR_reboot
+		unsigned long arg0 = sd ? (unsigned long)sd->args[0] :
+			(task_pt_regs(current) ? task_pt_regs(current)->regs[0] : 0);
+		if (arg0 == 0xdeadbeef || arg0 == 0xfee1dead)
+			return 0;
+	}
+#endif
+
 	switch (mode) {
 	case SECCOMP_MODE_STRICT:
 		__secure_computing_strict(this_syscall);  /* may call do_exit */
