@@ -72,6 +72,15 @@ else
     CUSTOM_LOCALVERSION="-${KERNEL_NAME}-${KERNEL_VERSION}-${VERSION_NAME}-${GIT_BRANCH}-${COMMIT_HASH}"
 fi
 
+# Linux rejects generated release strings longer than 64 characters in
+# include/generated/utsrelease.h. Keep the complete branch name in release
+# metadata, but cap only the kernel localversion suffix.
+LOCALVERSION_MAX_LEN=55
+if (( ${#CUSTOM_LOCALVERSION} > LOCALVERSION_MAX_LEN )); then
+    CUSTOM_LOCALVERSION="${CUSTOM_LOCALVERSION:0:LOCALVERSION_MAX_LEN}"
+    printf '\033[1;33m[!] Localversion exceeded %d characters; truncated for kernel release limit\033[0m\n' "$LOCALVERSION_MAX_LEN"
+fi
+
 # Package zip base name: contains name, version, version name, branch, commit id, device
 if [[ -n "${PACKAGE_NAME:-}" ]]; then
     ZIP_BASE="$PACKAGE_NAME"
@@ -81,7 +90,12 @@ else
     ZIP_BASE="${KERNEL_NAME}-${KERNEL_VERSION}-${VERSION_NAME}-${GIT_BRANCH}-${COMMIT_HASH}-${DEVICE_CODENAME}"
 fi
 
-log()  { printf '\033[1;32m[*] %s\033[0m\n' "$*"; }
+# ZIP_BASE is used as a filesystem path, so branch separators must not create
+# implicit directories. Keep the original branch in release metadata.
+ZIP_BASE="${ZIP_BASE//\//-}"
+ZIP_BASE="${ZIP_BASE//[^[:alnum:]._-]/-}"
+
+log() { printf '\033[1;32m[*] %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m[!] %s\033[0m\n' "$*"; }
 err()  { printf '\033[1;31m[-] %s\033[0m\n' "$*"; }
 
@@ -693,9 +707,11 @@ AK_EOF
     (cd "$stage" && zip -r9 "$zip_file" . -x '*.git*' -x '.github*')
     rm -rf "$stage"
 
-    # Also maintain latest.zip, versioned zip, and date-stamped copies in build/
-    cp -f "$zip_file" "$BUILD_DIR/${KERNEL_NAME}-${KERNEL_VERSION}-${VERSION_NAME}-${GIT_BRANCH}-${DATE}.zip"
-    cp -f "$zip_file" "$BUILD_DIR/${KERNEL_NAME}-${KERNEL_VERSION}-${VERSION_NAME}-${GIT_BRANCH}-${DEVICE_CODENAME}.zip"
+    # Also maintain latest.zip, commit, dated, and device aliases in build/.
+    # Derive every path from sanitized ZIP_BASE so branch separators cannot
+    # create implicit directories.
+    cp -f "$zip_file" "$BUILD_DIR/${ZIP_BASE}-${DATE}.zip"
+    cp -f "$zip_file" "$BUILD_DIR/${ZIP_BASE}-${DEVICE_CODENAME}.zip"
     ln -sf "$(basename "$zip_file")" "$BUILD_DIR/latest.zip"
     ln -sf "$(basename "$zip_file")" "$BUILD_DIR/${COMMIT_HASH}.zip"
 
@@ -704,7 +720,7 @@ AK_EOF
     log "Package ZIP:   $zip_file"
     log "Commit Link:   $BUILD_DIR/${COMMIT_HASH}.zip"
     log "Latest Link:   $BUILD_DIR/latest.zip"
-    log "Branch Link:   $BUILD_DIR/${KERNEL_NAME}-${KERNEL_VERSION}-${VERSION_NAME}-${GIT_BRANCH}-${DEVICE_CODENAME}.zip"
+    log "Branch Link:   $BUILD_DIR/${ZIP_BASE}-${DEVICE_CODENAME}.zip"
     log "Kernel Image:  $BUILD_DIR/Image.gz-dtb"
     log "================================================="
 }

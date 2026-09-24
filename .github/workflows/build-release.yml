@@ -21,7 +21,10 @@ jobs:
       - name: Checkout Source Code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          # This kernel repository has a very large Git history. A shallow
+          # checkout avoids downloading gigabytes while retaining enough
+          # commits for the generated release notes.
+          fetch-depth: 16
 
       - name: Install Host Build Dependencies
         run: |
