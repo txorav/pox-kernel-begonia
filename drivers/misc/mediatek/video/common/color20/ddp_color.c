@@ -79,28 +79,62 @@
 #endif
 
 #define UNUSED(expr) (void)(expr)
-/* global PQ param for kernel space - calibrated for iOS TrueColor reference */
+
+/*
+ * ===========================================================================
+ * Pox display color reference
+ * ===========================================================================
+ *
+ * The DISP COLOR block is MTK's "MiraVision" PQ engine: it is inserted in the
+ * primary path (OVL -> RDMA -> COLOR -> CCORR -> GAMMA -> DITHER -> DSI) and is
+ * programmed on every path start from the params below.  A PQ param however
+ * does not contain gains, it contains *indices* into the customer tuning tables
+ * (g_Color_Index, 100 lines below).  With MTK's factory "placeholder" tables
+ * every index resolved to unity gain, so the engine was a pass-through and the
+ * indices were meaningless.
+ *
+ * The tables below are now populated with a real, monotonic, unity-referenced
+ * ramp, therefore:
+ *
+ *   index 4 == unity  == the index the panel/MTK native profile uses, which is
+ *                        exactly the register value the old flat tables always
+ *                        produced (GLOBAL_SAT 0x80 == 1.000, CONTRAST 0x80 ==
+ *                        1.000, BRIGHTNESS 0x400 == 1.000, offset 0).
+ *
+ * => REFERENCE / STANDARD stay bit-identical to the previous behaviour (no
+ *    digital processing, panel factory calibration untouched), while VIVID and
+ *    S-LOG3 finally *do* something instead of being placebos.
+ *
+ * Rules kept for color accuracy:
+ *   - the reference profile never adds saturation/contrast/brightness offset,
+ *     and leaves the per-tone partial saturation disabled (index 0), because
+ *     the per-tone tables are not tuned for this panel;
+ *   - brightness is only ever pushed *down* far (shadow crush is harmless),
+ *     the lift side is capped at +7.8% so that 8-bit highlights cannot clip;
+ *   - u4SHPGain is kept at the vendor value for the reference profile (it is a
+ *     userspace/TDSHP index on this platform, see ddp_color.h note below).
+ */
 static struct DISP_PQ_PARAM g_Color_Param[2] = {
 	{
-		.u4SHPGain    = 3,               /* Apple Retina-grade crisp edge & text clarity */
-		.u4SatGain    = 5,               /* Calibrated DCI-P3 / sRGB natural vibrancy */
+		.u4SHPGain    = 2,               /* vendor default (TDSHP index) */
+		.u4SatGain    = 4,               /* index 4 == unity == no processing */
 		.u4PartialY   = 0,
-		.u4HueAdj     = {9, 9, 9, 9},    /* Reference neutral hue (0-degree shift) */
-		.u4SatAdj     = {0, 1, 2, 2},    /* Natural skin tone (1), lush foliage (2), deep sky blue (2) */
-		.u4Contrast   = 5,               /* Liquid Retina dynamic range (inky blacks, zero crush) */
-		.u4Brightness = 4,
-		.u4Ccorr      = 0,
+		.u4HueAdj     = {9, 9, 9, 9},    /* index 9 == neutral hue */
+		.u4SatAdj     = {0, 0, 0, 0},    /* 0 == per-tone saturation disabled */
+		.u4Contrast   = 4,               /* index 4 == unity == no processing */
+		.u4Brightness = 4,               /* index 4 == unity == no processing */
+		.u4Ccorr      = 0,               /* CCORR index, consumed by the HAL only */
 #if defined(COLOR_3_0)
 		.u4ColorLUT   = 0
 #endif
 	 },
 	{
-		.u4SHPGain    = 3,
-		.u4SatGain    = 5,
+		.u4SHPGain    = 2,
+		.u4SatGain    = 4,
 		.u4PartialY   = 0,
 		.u4HueAdj     = {9, 9, 9, 9},
-		.u4SatAdj     = {0, 1, 2, 2},
-		.u4Contrast   = 5,
+		.u4SatAdj     = {0, 0, 0, 0},
+		.u4Contrast   = 4,
 		.u4Brightness = 4,
 		.u4Ccorr      = 1,
 #if defined(COLOR_3_0)
@@ -109,166 +143,150 @@ static struct DISP_PQ_PARAM g_Color_Param[2] = {
 	}
 };
 
+/*
+ * Camera-scene and gallery-scene param sets.  They are not consumed by the
+ * kernel COLOR engine (it only ever reads g_Color_Param[]), they are the
+ * staging area the MTK PQ HAL exchanges through DISP_IOCTL_GET/SET_PQPARAM_CAM /
+ * _GAL when the camera or the gallery claims the display, so they must describe
+ * the same reference profile as the global one.
+ */
 static struct DISP_PQ_PARAM g_Color_Cam_Param = {
-u4SHPGain:3,
-u4SatGain:5,
-u4PartialY:0,
-u4HueAdj:{9, 9, 9, 9},
-u4SatAdj:{0, 1, 2, 2},
-u4Contrast:5,
-u4Brightness:4,
-u4Ccorr:2,
+	.u4SHPGain    = 0,               /* vendor camera value (TDSHP index) */
+	.u4SatGain    = 4,
+	.u4PartialY   = 0,
+	.u4HueAdj     = {9, 9, 9, 9},
+	.u4SatAdj     = {0, 0, 0, 0},
+	.u4Contrast   = 4,
+	.u4Brightness = 4,
+	.u4Ccorr      = 2,
 #if defined(COLOR_3_0)
-u4ColorLUT:0
+	.u4ColorLUT   = 0
 #endif
 };
 
 static struct DISP_PQ_PARAM g_Color_Gal_Param = {
-u4SHPGain:3,
-u4SatGain:5,
-u4PartialY:0,
-u4HueAdj:{9, 9, 9, 9},
-u4SatAdj:{0, 1, 2, 2},
-u4Contrast:5,
-u4Brightness:4,
-u4Ccorr:3,
+	.u4SHPGain    = 2,
+	.u4SatGain    = 4,
+	.u4PartialY   = 0,
+	.u4HueAdj     = {9, 9, 9, 9},
+	.u4SatAdj     = {0, 0, 0, 0},
+	.u4Contrast   = 4,
+	.u4Brightness = 4,
+	.u4Ccorr      = 3,
 #if defined(COLOR_3_0)
-u4ColorLUT:0
+	.u4ColorLUT   = 0
 #endif
 };
 
-static int current_ios_color_mode = 1; /* Default: 1 = True Tone / iOS Calibrated D65 Reference */
+/*
+ * One row per color mode (all fields are *index numbers* into the ramps of
+ * g_Color_Index below).
+ *   sat / contrast / brightness : index 4 == unity (no processing)
+ *   sat_adj                     : 0 == per-tone saturation adjustment disabled
+ *   hue (fixed)                 : 9 == neutral
+ *
+ * u4SHPGain is deliberately not part of the profile: on this platform it is a
+ * TDSHP index that only userspace (DISP_IOCTL_SET_TDSHPINDEX/TDSHP_FLAG) turns
+ * into sharpening registers, so the kernel keeps the vendor value.
+ */
+struct pox_pq_profile {
+	unsigned int sat;
+	unsigned int contrast;
+	unsigned int brightness;
+	unsigned int sat_adj;
+};
+
+static const struct pox_pq_profile pox_pq_profiles[] = {
+	/*
+	 * 0 - STANDARD: panel-native reference, zero digital processing.
+	 * 1 - REFERENCE (True Tone id / default): identical by design - an
+	 *     accuracy profile *must not* add processing, and a real adaptive
+	 *     white point would need the ambient light sensor + CCORR, which is
+	 *     ROM scope.  Keeping both neutral also means the boot state is
+	 *     bit-identical to the previous flat-table behaviour.
+	 */
+	{ .sat = 4, .contrast = 4, .brightness = 4, .sat_adj = 0 },
+	{ .sat = 4, .contrast = 4, .brightness = 4, .sat_adj = 0 },
+	/*
+	 * 2 - VIVID: +28% saturation and +12.5% contrast, brightness offset and
+	 *     the per-tone stages left neutral so whites never clip.
+	 */
+	{ .sat = 7, .contrast = 6, .brightness = 4, .sat_adj = 0 },
+	/*
+	 * 3 - S-LOG3 / flat cinema preview: -19% saturation, -12.5% contrast
+	 *     and a small shadow lift (+3.1%) to emulate a log view transform,
+	 *     still bounded so that the UI does not become unusable.
+	 */
+	{ .sat = 2, .contrast = 2, .brightness = 6, .sat_adj = 0 },
+};
+
+#define POX_PQ_MODE_COUNT (sizeof(pox_pq_profiles) / sizeof(pox_pq_profiles[0]))
+#define POX_PQ_MODE_DEFAULT COLOR_MODE_REFERENCE
+#define POX_PQ_SAT_ADJ_CNT 4
+#define POX_PQ_HUE_ADJ_CNT 4
+#define POX_PQ_HUE_NEUTRAL 9
+
+static int current_ios_color_mode = POX_PQ_MODE_DEFAULT;
+static DEFINE_MUTEX(g_pox_color_mode_lock);
+
+/* Defined below, after the COLOR_TOTAL_MODULE_NUM / clock-state definitions. */
+static void pox_pq_apply_to_hw(void);
+
+static void pox_pq_apply_profile(struct DISP_PQ_PARAM *p,
+				 const struct pox_pq_profile *prof)
+{
+	int i;
+
+	p->u4SatGain = prof->sat;
+	p->u4Contrast = prof->contrast;
+	p->u4Brightness = prof->brightness;
+	p->u4PartialY = 0;
+	for (i = 0; i < POX_PQ_SAT_ADJ_CNT; i++)
+		p->u4SatAdj[i] = prof->sat_adj;
+	for (i = 0; i < POX_PQ_HUE_ADJ_CNT; i++)
+		p->u4HueAdj[i] = POX_PQ_HUE_NEUTRAL;
+#if defined(COLOR_3_0)
+	p->u4ColorLUT = 0;
+#endif
+}
 
 int set_ios_color_mode(int mode)
 {
-	if (mode < 0 || mode > 3)
+	const struct pox_pq_profile *prof;
+
+	if (mode < 0 || mode >= (int)POX_PQ_MODE_COUNT)
 		return -EINVAL;
+
+	prof = &pox_pq_profiles[mode];
+
+	mutex_lock(&g_pox_color_mode_lock);
+
+	pox_pq_apply_profile(&g_Color_Param[0], prof);
+	/* COLOR1 exists on MT6799 only, keep both ids consistent anyway. */
+	g_Color_Param[1] = g_Color_Param[0];
+	g_Color_Param[1].u4Ccorr = 1;
+
+	/* The camera / gallery staging sets follow the active profile. */
+	pox_pq_apply_profile(&g_Color_Cam_Param, prof);
+	g_Color_Cam_Param.u4Ccorr = 2;
+	pox_pq_apply_profile(&g_Color_Gal_Param, prof);
+	g_Color_Gal_Param.u4Ccorr = 3;
 
 	current_ios_color_mode = mode;
 
-	if (mode == 0) {
-		/* Mode 0: Standard Neutral */
-		g_Color_Param[0].u4SHPGain = 2;
-		g_Color_Param[0].u4SatGain = 4;
-		g_Color_Param[0].u4Contrast = 4;
-		g_Color_Param[0].u4Brightness = 4;
-		g_Color_Param[0].u4SatAdj[0] = 0;
-		g_Color_Param[0].u4SatAdj[1] = 0;
-		g_Color_Param[0].u4SatAdj[2] = 0;
-		g_Color_Param[0].u4SatAdj[3] = 0;
+	mutex_unlock(&g_pox_color_mode_lock);
 
-		/* Camera PQ */
-		g_Color_Cam_Param.u4SHPGain = 2;
-		g_Color_Cam_Param.u4SatGain = 4;
-		g_Color_Cam_Param.u4Contrast = 4;
-		g_Color_Cam_Param.u4Brightness = 4;
-		g_Color_Cam_Param.u4SatAdj[0] = 0;
-		g_Color_Cam_Param.u4SatAdj[1] = 0;
-		g_Color_Cam_Param.u4SatAdj[2] = 0;
-		g_Color_Cam_Param.u4SatAdj[3] = 0;
+	/*
+	 * Push it to the hardware now.  The COLOR engine is only reprogrammed
+	 * when the display path is started, so without this the new profile would
+	 * stay in RAM until the next screen off/on - which is exactly why these
+	 * color modes used to look like a no-op.
+	 */
+	pox_pq_apply_to_hw();
 
-		/* Gallery PQ */
-		g_Color_Gal_Param.u4SHPGain = 2;
-		g_Color_Gal_Param.u4SatGain = 4;
-		g_Color_Gal_Param.u4Contrast = 4;
-		g_Color_Gal_Param.u4Brightness = 4;
-		g_Color_Gal_Param.u4SatAdj[0] = 0;
-		g_Color_Gal_Param.u4SatAdj[1] = 0;
-		g_Color_Gal_Param.u4SatAdj[2] = 0;
-		g_Color_Gal_Param.u4SatAdj[3] = 0;
-	} else if (mode == 1) {
-		/* Mode 1: True Tone / iOS Calibrated D65 Reference (Liquid Retina Default) */
-		g_Color_Param[0].u4SHPGain = 3;
-		g_Color_Param[0].u4SatGain = 5;
-		g_Color_Param[0].u4Contrast = 5;
-		g_Color_Param[0].u4Brightness = 4;
-		g_Color_Param[0].u4SatAdj[0] = 0;
-		g_Color_Param[0].u4SatAdj[1] = 1;
-		g_Color_Param[0].u4SatAdj[2] = 2;
-		g_Color_Param[0].u4SatAdj[3] = 2;
+	pr_info("[COLOR] profile -> mode %d (sat %u, contrast %u, brightness %u, sat_adj %u)\n",
+		mode, prof->sat, prof->contrast, prof->brightness, prof->sat_adj);
 
-		/* Camera PQ - Leica crisp edge detail & vibrant depth */
-		g_Color_Cam_Param.u4SHPGain = 3;
-		g_Color_Cam_Param.u4SatGain = 5;
-		g_Color_Cam_Param.u4Contrast = 5;
-		g_Color_Cam_Param.u4Brightness = 4;
-		g_Color_Cam_Param.u4SatAdj[0] = 0;
-		g_Color_Cam_Param.u4SatAdj[1] = 1;
-		g_Color_Cam_Param.u4SatAdj[2] = 2;
-		g_Color_Cam_Param.u4SatAdj[3] = 2;
-
-		/* Gallery PQ */
-		g_Color_Gal_Param.u4SHPGain = 3;
-		g_Color_Gal_Param.u4SatGain = 5;
-		g_Color_Gal_Param.u4Contrast = 5;
-		g_Color_Gal_Param.u4Brightness = 4;
-		g_Color_Gal_Param.u4SatAdj[0] = 0;
-		g_Color_Gal_Param.u4SatAdj[1] = 1;
-		g_Color_Gal_Param.u4SatAdj[2] = 2;
-		g_Color_Gal_Param.u4SatAdj[3] = 2;
-	} else if (mode == 2) {
-		/* Mode 2: iOS Vivid / Gaming Cinema (Enhanced HDR for Games & Movies) */
-		g_Color_Param[0].u4SHPGain = 4;
-		g_Color_Param[0].u4SatGain = 6;
-		g_Color_Param[0].u4Contrast = 6;
-		g_Color_Param[0].u4Brightness = 5;
-		g_Color_Param[0].u4SatAdj[0] = 1;
-		g_Color_Param[0].u4SatAdj[1] = 2;
-		g_Color_Param[0].u4SatAdj[2] = 3;
-		g_Color_Param[0].u4SatAdj[3] = 3;
-
-		/* Camera PQ */
-		g_Color_Cam_Param.u4SHPGain = 4;
-		g_Color_Cam_Param.u4SatGain = 6;
-		g_Color_Cam_Param.u4Contrast = 6;
-		g_Color_Cam_Param.u4Brightness = 5;
-		g_Color_Cam_Param.u4SatAdj[0] = 1;
-		g_Color_Cam_Param.u4SatAdj[1] = 2;
-		g_Color_Cam_Param.u4SatAdj[2] = 3;
-		g_Color_Cam_Param.u4SatAdj[3] = 3;
-
-		/* Gallery PQ */
-		g_Color_Gal_Param.u4SHPGain = 4;
-		g_Color_Gal_Param.u4SatGain = 6;
-		g_Color_Gal_Param.u4Contrast = 6;
-		g_Color_Gal_Param.u4Brightness = 5;
-		g_Color_Gal_Param.u4SatAdj[0] = 1;
-		g_Color_Gal_Param.u4SatAdj[1] = 2;
-		g_Color_Gal_Param.u4SatAdj[2] = 3;
-		g_Color_Gal_Param.u4SatAdj[3] = 3;
-	} else if (mode == 3) {
-		/* Mode 3: Sony S-Log3 / Cinema Flat Profile (Logarithmic Dynamic Range for LUT Grading) */
-		g_Color_Param[0].u4SHPGain = 0;       /* No digital artificial edge sharpening, organic texture */
-		g_Color_Param[0].u4SatGain = 2;       /* Flat neutral saturation for wide-gamut log */
-		g_Color_Param[0].u4Contrast = 1;      /* Flat contrast curve, lifted shadow floor, no highlight clipping */
-		g_Color_Param[0].u4Brightness = 5;    /* Lifted exposure latitude */
-		g_Color_Param[0].u4SatAdj[0] = 0;
-		g_Color_Param[0].u4SatAdj[1] = 0;     /* True neutral skin tone */
-		g_Color_Param[0].u4SatAdj[2] = 0;
-		g_Color_Param[0].u4SatAdj[3] = 0;
-
-		/* Configure camera PQ param for flat logarithmic preview */
-		g_Color_Cam_Param.u4SHPGain = 0;
-		g_Color_Cam_Param.u4SatGain = 2;
-		g_Color_Cam_Param.u4Contrast = 1;
-		g_Color_Cam_Param.u4Brightness = 5;
-		g_Color_Cam_Param.u4SatAdj[0] = 0;
-		g_Color_Cam_Param.u4SatAdj[1] = 0;
-		g_Color_Cam_Param.u4SatAdj[2] = 0;
-		g_Color_Cam_Param.u4SatAdj[3] = 0;
-
-		/* Gallery PQ flat for log review */
-		g_Color_Gal_Param.u4SHPGain = 0;
-		g_Color_Gal_Param.u4SatGain = 2;
-		g_Color_Gal_Param.u4Contrast = 1;
-		g_Color_Gal_Param.u4Brightness = 5;
-		g_Color_Gal_Param.u4SatAdj[0] = 0;
-		g_Color_Gal_Param.u4SatAdj[1] = 0;
-		g_Color_Gal_Param.u4SatAdj[2] = 0;
-		g_Color_Gal_Param.u4SatAdj[3] = 0;
-	}
-
-	g_Color_Param[1] = g_Color_Param[0];
 	return 0;
 }
 EXPORT_SYMBOL(set_ios_color_mode);
@@ -315,14 +333,21 @@ static struct MDP_TDSHP_REG g_tdshp_reg = {
 /* (because system default is 0, need fill with 0x80) */
 
 static struct DISPLAY_PQ_T g_Color_Index = {
-GLOBAL_SAT:	/* 0~9 */
-	{0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80},
+GLOBAL_SAT:	/* 0~9 : u4SatGain    (0x80 == 1.000x, 1 LSB == 1/128) */
+	/*  0.625  0.750  0.813  0.906  unity  1.094  1.188  1.281  1.375  1.500 */
+	{0x50, 0x60, 0x68, 0x74, 0x80, 0x8C, 0x98, 0xA4, 0xB0, 0xC0},
 
-CONTRAST :	/* 0~9 */
-	{0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80},
+CONTRAST :	/* 0~9 : u4Contrast   (0x80 == 1.000x, 1 LSB == 1/128) */
+	/*  0.750  0.813  0.875  0.938  unity  1.063  1.125  1.188  1.250  1.313 */
+	{0x60, 0x68, 0x70, 0x78, 0x80, 0x88, 0x90, 0x98, 0xA0, 0xA8},
 
-BRIGHTNESS :	/* 0~9 */
-	{0x400, 0x400, 0x400, 0x400, 0x400, 0x400, 0x400, 0x400, 0x400, 0x400},
+BRIGHTNESS :	/* 0~9 : u4Brightness (0x400 == 1.000x == 0 offset, 1 LSB == 1/1024)
+		 * The lift side is intentionally shallow (+7.8% max): a digital
+		 * brightness offset clips 8-bit highlights, while the negative
+		 * side only crushes shadows and is therefore safe.
+		 *  -12.5% -6.25% -3.13% -1.56%  unity  +1.56% +3.13% +4.69% +6.25% +7.81%
+		 */
+	{0x340, 0x380, 0x3B0, 0x3D8, 0x400, 0x410, 0x420, 0x430, 0x440, 0x450},
 
 PARTIAL_Y :
 	{
@@ -1943,6 +1968,34 @@ void DpEngine_COLORonConfig(enum DISP_MODULE_ENUM module, void *__cmdq)
 	}
 #endif
 }
+/*
+ * Apply the current PQ params to the COLOR engine immediately.
+ *
+ * DpEngine_COLORonConfig() is only reached from _color_start() (display path
+ * start) and from the PQ ioctl path, so a profile written from sysfs/procfs
+ * would otherwise stay in RAM until the display is restarted.  Mirror what
+ * DISP_IOCTL_SET_PQPARAM does - re-init + re-config - but with a NULL cmdq
+ * handle, which DISP_REG_SET translates into a CPU register write (the same
+ * mechanism mtk_color_setbypass() uses on MT6785).  The COLOR block latches on
+ * the next frame boundary, so this is safe while the display is running.
+ */
+static void pox_pq_apply_to_hw(void)
+{
+	enum DISP_MODULE_ENUM module = DISP_MODULE_COLOR0;
+
+	if (atomic_read(&g_color_is_clock_on[index_of_color(module)]) != 1) {
+		/*
+		 * Display powered down: keep the params in RAM, they are picked
+		 * up by _color_start() when the display is enabled again.
+		 */
+		return;
+	}
+
+	DpEngine_COLORonInit(module, NULL);
+	DpEngine_COLORonConfig(module, NULL);
+}
+
+
 
 static void color_write_hw_reg(enum DISP_MODULE_ENUM module,
 	const struct DISPLAY_COLOR_REG *color_reg, void *cmdq)

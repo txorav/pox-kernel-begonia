@@ -49,6 +49,20 @@ struct boost {
 
 static struct boost ktchboost;
 
+/* Pox dynamic engine: real touch-activity signal. Returns 1 while a
+ * finger is down or boost events are pending. Built-in link, no export
+ * needed. Read-only, no behavior change to ktch itself. */
+int pox_touch_active_hint(void)
+{
+	int active;
+	unsigned long flags;
+
+	spin_lock_irqsave(&ktchboost.touch_lock, flags);
+	active = ktchboost.touch_event || (atomic_read(&ktchboost.event) > 0);
+	spin_unlock_irqrestore(&ktchboost.touch_lock, flags);
+	return active;
+}
+
 static int ktch_mgr_enable = 1;
 static int ktch_mgr_core = 1;
 static int ktch_mgr_freq = 1500000;

@@ -1,75 +1,115 @@
-# Security audit — known issues & remediation status
+# Security audit — safe-rootless by design (all features kept)
 
 Base: Linux 4.14.357, arm64, MT6785 (begonia). Branch: `onyx`.
-Status: **ALL VERIFIED Project-Specific Findings (A1–A5, B) RESOLVED AND SECURED.**
+Status: **ALL FEATURES PRESERVED. Hardened where it can't brick/corrupt.**
+
+Pox stands out by keeping what others remove: graded rootless torch,
+18W safe fast-charge, universal USB OTG, True Tone, 4K60, gaming touch.
+Safety lives in hardware guards, not feature removal.
 
 ---
 
-## A. Custom Issues Remediation Summary
+## A. Safe-rootless torch grading — KEPT + HARDENED (standout)
 
-### A1. SELinux MAC bypass for world-writable / torch / perfmgr nodes — FIXED
-- **Previous State:**
-  - `security/selinux/hooks.c:1723-1750`: `is_rootless_allowed_node()` unconditionally allowed operations on any `0002` inode or dentries matching `torch`/`flashlight`/`perfmgr`/`leds`.
-  - `fs/proc/inode.c:450-454`: set `S_PRIVATE` on all matching nodes, bypassing LSM checks entirely.
-- **Fix Applied:**
-  - Removed `is_rootless_allowed_node()` entirely from `security/selinux/hooks.c` and restored standard `inode_has_perm` and `selinux_inode_permission` AVC checks.
-  - Removed `S_PRIVATE` assignment in `fs/proc/inode.c`. All proc nodes now strictly adhere to standard Linux DAC and Android SELinux MAC policy.
+- **Design (intentional):**
+  - `drivers/misc/mediatek/performance/gaming_mode.c:646,1010`:
+    `torch_brightness` / `flashlight_brightness` proc+sysfs stay `0666`
+    with **no** `CAP_SYS_ADMIN` so stock flashlight apps work without root.
+  - `drivers/misc/mediatek/flashlight/flashlights-mt6360-mt6785.c:838`:
+    `torchbrightness` sysfs stays `0666` for the same reason.
+  - `security/selinux/hooks.c:1723`: `is_rootless_allowed_node()` narrowly
+    confines the LSM exception to 4 names only
+    (`torchbrightness`, `torch_brightness`, `flashlight_brightness`,
+    `torch_info`), sysfs/proc only, world-readable only, no
+    `d_find_any_alias` (no dcache contention on 8 cores). Now also
+    handles `LSM_AUDIT_DATA_FILE` so `open()` works consistently.
+  - `fs/proc/inode.c:450`: `S_PRIVATE` on those 3 proc aliases only, so
+    ROMs without custom SELinux policy still get working torch.
+- **Guards (why it can't fuck the device):**
+  - `pox_torch_val_to_sel()`: clamp sel `0..24` (25..325mA/ch, 650mA dual max).
+    `0..10` grading table, `11..255` scaled, `>255` clamped.
+  - `pox_torch_brightness_set()` + both proc/sysfs stores: `0..255` clamp,
+    `20ms` anti-strobe (`-EBUSY` on flood), mutex, 5-min auto-off
+    `delayed_work`, `-ENODEV` if devices not ready.
+  - Oversize writes (`>=16B`) rejected with `-EINVAL` (no truncation misparse).
+- **Everything else locked down:**
+  - All other 17 `/proc/perfmgr/*` + 6 sysfs nodes: `0644`/`0444` +
+    `capable(CAP_SYS_ADMIN)` — gaming, color, HBM, battery, touch,
+    audio, vibrator, wakelock, fast_charge, dt2w, mic, fsync, camera.
+  - `camera_4k60` proc fixed `0666` → `0644` (handler already required
+    `CAP_SYS_ADMIN`; world-writable was redundant exposure).
+  - `build.sh` (`init.gaming.rc`): torch `0666` documented as by-design,
+    `camera_4k60` now `0644`, USB dir fixed `0755` (see B).
 
-### A2. ~20 world-writable `/proc/perfmgr/*` hardware controls, no privilege check — FIXED
-- **Previous State:**
-  - `drivers/misc/mediatek/performance/gaming_mode.c` created ~20 nodes at mode `0666` without capability or uid checks in write handlers.
-- **Fix Applied:**
-  - Changed node permissions from `0666` to `0644` (and `0444` for read-only info/status nodes).
-  - Prepended `if (!capable(CAP_SYS_ADMIN)) return -EPERM;` to all 17 proc write handlers: `gaming_mode_proc_write`, `color_mode_proc_write`, `hbm_mode_proc_write`, `torch_brightness_proc_write`, `camera_profile_proc_write`, `camera_4k60_proc_write`, `slog3_proc_write`, `battery_bypass_proc_write`, `battery_limit_proc_write`, `touch_game_mode_proc_write`, `touch_sensitivity_proc_write`, `headphone_gain_proc_write`, `vibrator_strength_proc_write`, `wakelock_blocker_proc_write`, `fast_charge_proc_write`, `dt2w_proc_write`, `mic_gain_proc_write`, and `dynamic_fsync_proc_write`.
-  - Prepended `if (!capable(CAP_SYS_ADMIN)) return -EPERM;` and enforced `0644` mode across all 6 sysfs store handlers.
-  - Updated `build.sh` (`init.gaming.rc` generation) to ensure proper `0644`/`0444` permissions at boot.
+### A2. Dynamic fsync — KEPT + GATED
+- `fs/sync.c:45`: `0644` + `CAP_SYS_ADMIN`. Auto-disarm on powersave/
+  balanced exit in `gaming_mode.c:287,293`. No silent durability loss
+  for normal apps.
 
-### A3. Dynamic fsync silently drops durability — FIXED
-- **Previous State:**
-  - `fs/sync.c:44-50`: `dynamic_fsync_store()` lacked privilege verification.
-- **Fix Applied:**
-  - Added `if (!capable(CAP_SYS_ADMIN)) return -EPERM;` to `dynamic_fsync_store()`.
-  - Enforced `0644` permissions on `dynamic_fsync_kattr`.
-
-### A4. Charger bypass + fast-charge override — FIXED
-- **Previous State:**
-  - Exposed via unauthenticated world-writable `0666` nodes.
-- **Fix Applied:**
-  - `battery_bypass`, `battery_limit`, and `fast_charge` proc nodes changed to `0644` with `CAP_SYS_ADMIN` enforcement.
-  - Native Custom ROM battery management connected securely via standard `POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT` and `POWER_SUPPLY_PROP_CHARGING_ENABLED` in `mtk_battery.c`.
-
-### A5. Flashlight/torch, HBM, audio-mic, gaming thermal control — FIXED
-- **Previous State:**
-  - Unauthenticated setters for hardware knobs.
-- **Fix Applied:**
-  - Gated all setters with `capable(CAP_SYS_ADMIN)`.
-  - In `flashlights-mt6360-mt6785.c`, changed `dev_attr_torchbrightness` mode to `0644` and added `capable(CAP_SYS_ADMIN)` check to `torchbrightness_store`. Graded brightness values are safely clamped to 24 (325 mA thermal ceiling).
-
----
-
-## B. Hardening Deltas (`arch/arm64/configs/`) — VERIFIED & UPDATED
-
-| Setting | `begonia_user` | `begonia_apatch` | `stock` | Status / Note |
-|---|---|---|---|---|
-| `CONFIG_KALLSYMS_ALL` | y | y | not set | Root-tool compat |
-| `CONFIG_RANDOMIZE_BASE` (KASLR) | y | **y (FIXED)** | y | Enabled in `begonia_apatch_defconfig` |
-| `CONFIG_FORTIFY_SOURCE` | y | y | not set | Compile-time bounds checking active |
-| `CONFIG_SLAB_FREELIST_RANDOM/HARDENED` | y | y | not set | Kernel heap freelist hardening active |
-| `CONFIG_INIT_STACK_ALL_ZERO` + `CONFIG_INIT_ON_ALLOC_DEFAULT_ON` | y | y | not set | Auto-zero stack & heap allocations active |
-| `CONFIG_REFCOUNT_FULL` | y | y | not set | Fast refcount overflow protection active |
-| `CONFIG_SECURITY_YAMA` | y | y | not set | Yama ptrace scope restrictions active |
-| `CONFIG_BPF_UNPRIV_DEFAULT_OFF` | y | y | missing | Unprivileged BPF disabled |
-| `CONFIG_USERFAULTFD` | y | y | not set | Userfaultfd present |
-| `CONFIG_KPROBES` | not set | not set | not set | Disabled across all configs |
-| `CONFIG_MODULE_SIG` | not set | not set | not set | Retained for root module compat |
+### A3. Charger bypass + 18W/6W fast-charge — KEPT + SAFE FLOOR
+- `battery_bypass/limit/fast_charge`: `0644` + `CAP_SYS_ADMIN`. No world writes.
+- 18W dual (4.2A) only on `STANDARD/NONSTANDARD/APPLE_2_1A` when
+  `battery_temp < 48C`; 6W PC-USB (1.2A in) only on host types.
+  Thermal floor (`2.0A` AC / `1.5A` USB) applies **only** `<48C` with
+  `pr_info_ratelimited`; at `>=48C` JEITA + thermal daemon win and can
+  pull to 0. Hysteresis 5% on charge-limit cap. `fast_charge=1` default
+  kept — still opt-out via `/proc/perfmgr/fast_charge 0`.
 
 ---
 
-## C. Upstream & Additional CVE Audits
+## B. USB OTG — ALL DRIVERS KEPT, perms fixed so USB keeps working
 
-- **DirtyPipe (CVE-2022-0847):** PATCHED in `fs/pipe.c`.
-- **Binder poll race (CVE-2019-2215):** PATCHED in `drivers/android/binder.c`.
-- **Netfilter x_tables (CVE-2021-22555):** PATCHED in `net/netfilter/x_tables.c`.
-- **ALSA rawmidi UAF (CVE-2020-27786):** PATCHED in `sound/core/rawmidi.c`.
-- **OverlayFS SUID privilege escalation (CVE-2023-0386):** MITIGATED in `fs/overlayfs/copy_up.c`.
-- **MediaTek CMDQ physical memory access (CVE-2020-0069):** `CMDQ_IOCTL_EXEC_COMMAND` disabled (`#if 0`) in `drivers/misc/mediatek/cmdq/v3/cmdq_driver.c`.
+- `CONFIG_USB_ACM/PRINTER/WDM/SERIAL_{GENERIC,CH341,CP210X,FTDI,PL2303}/
+  USBNET_{AX8817X,CDCETHER,NCM,RNDIS}/IPHETH` stay `=y` (DACs,
+  controllers, serial, ethernet, iPhone tethering).
+  `USB_SERIAL_CONSOLE` kept (no feature removed).
+  `USB_ANNOUNCE_NEW_DEVICES` kept for OTG plug-and-play logging.
+- `build.sh`: `chmod 0666 /dev/bus/usb` on a **directory** stripped `+x`
+  and broke enumeration. Fixed to `0755` dir + `0666` on
+  `/dev/bus/usb/*/*` + `ttyUSB0-3/ttyACM0-1` — every adapter still
+  plug-and-play, enumeration never breaks. No device corruption path.
+
+## C. Stability guards — nothing that reboots/corrupts
+
+- Watchdog `kwdt_thread`: kept precise `usleep_range()` (reverted
+  `schedule_timeout_interruptible(jiffies)` experiment — coarse jiffies
+  + interruptible kick risked spurious reset under load).
+- `ktch` boost `wait_event_interruptible` + `ion_history`
+  `msleep_interruptible` kept (clean `kthread_should_stop` /
+  `fatal_signal_pending` handling, no missed-kick path).
+- Touch `SCHED_FIFO 98/90 + nice -20` kept for zero frame-drop feel;
+  watchdog precision above guarantees kick even under touch flood.
+- `child_runs_first=0`, `MD1_SUPPORT=12`/`MD_GENERATION=6293`,
+  `nomerges=0`, `read_ahead 128KB`, VM watermarks stock — all kept from
+  `e7d9a65d0` freeze/modem/VFS fix. No aggressive reclaim that OOMs.
+- ISP dynamic DFS kept (no forced `560MHz` floor); `camera_4k60_force=0`
+  default so 4K60 heat is opt-in per recording, not always-on.
+
+## D. Hardening deltas (`arch/arm64/configs/`) — kept for root compat
+
+| Setting | `begonia_user` | `begonia_apatch` | Note |
+|---|---|---|---|
+| `CONFIG_KALLSYMS_ALL` | y | y | APatch/root compat (KASLR bypass aid — accepted tradeoff) |
+| `CONFIG_RANDOMIZE_BASE` (KASLR) | y | y | Enabled everywhere |
+| `CONFIG_FORTIFY_SOURCE` | y | y | On |
+| `CONFIG_SLAB_FREELIST_RANDOM/HARDENED` | y | y | On |
+| `CONFIG_INIT_STACK_ALL_ZERO` + `CONFIG_INIT_ON_ALLOC_DEFAULT_ON` | y | y | On |
+| `CONFIG_REFCOUNT_FULL` | y | y | On |
+| `CONFIG_SECURITY_YAMA` | y | y | On |
+| `CONFIG_BPF_UNPRIV_DEFAULT_OFF` | y | y | Unpriv BPF off |
+| `CONFIG_USERFAULTFD` | y | y | Kept (root-tool compat; race-aid tradeoff documented) |
+| `CONFIG_KPROBES` | not set | not set | Off everywhere |
+| `CONFIG_MODULE_SIG` | not set | not set | Off for root modules (tradeoff documented) |
+
+---
+
+## E. Upstream CVE status (honest)
+
+- **x_tables CVE-2021-22555:** compat pad-zero in `net/netfilter/x_tables.c`
+  (match/target). Partial — full `xt_alloc_table_info` audit still open.
+- **rawmidi CVE-2020-27786:** `buffer_ref EBUSY` guard in `sound/core/rawmidi.c`. Done.
+- **overlayfs CVE-2023-0386:** `CAP_FOWNER` SUID strip in `fs/overlayfs/copy_up.c`. Done.
+- **DirtyPipe CVE-2022-0847 / Binder CVE-2019-2215 / CMDQ CVE-2020-0069:**
+  claimed before, **UNVERIFIED** in this tree (`fs/pipe.c` still classic
+  `anon_pipe_buf_ops.can_merge=1`, no pipe commit in log). Do not claim
+  patched until backport + PoC test lands. No feature depends on them.

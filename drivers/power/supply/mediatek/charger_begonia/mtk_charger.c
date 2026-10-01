@@ -1879,11 +1879,58 @@ static void charger_check_status(struct charger_manager *info)
 		goto stop_charging;
 	}
 
-	/* Smart Battery Guard & Direct Power Bypass Evaluation */
+	/* Smart Battery Guard & Direct Power Bypass Evaluation.
+	 * Pox health-adaptive + anti-spike: all features kept (manual
+	 * bypass, 50..100 cap with 5% hysteresis, thermal guard with 2C
+	 * hysteresis). Overrides only in dangerous regions to stop
+	 * VSYS droop freezes and over-voltage swelling:
+	 * - vbat>4450mV: stop charging (OVP spike guard, 50mV hysteresis)
+	 * - vbat<3300mV or uisoc<20: force charging, ignore bypass
+	 *   (UVLO/brownout guard, prevents call/game reboot freeze)
+	 * - uisoc>30 but vbat<3500mV: weak/aged high-ESR sag -> force
+	 *   gentle charging, no bypass flapping (smooth experience)
+	 * Hysteresis on every override stops power-path oscillation
+	 * that causes current spikes and UI freezes. */
 	{
 		int uisoc = battery_get_uisoc();
+		int vbat = battery_get_bat_voltage(); /* mV */
+		static bool vhigh_hold, vlow_hold, lowsoc_hold, weak_hold;
 
-		if (g_battery_bypass_mode) {
+		if (vbat > 4450)
+			vhigh_hold = true;
+		else if (vbat < 4400)
+			vhigh_hold = false;
+
+		if (vbat < 3300)
+			vlow_hold = true;
+		else if (vbat > 3350)
+			vlow_hold = false;
+
+		if (uisoc < 20)
+			lowsoc_hold = true;
+		else if (uisoc > 22)
+			lowsoc_hold = false;
+
+		if (uisoc > 30 && vbat < 3500)
+			weak_hold = true;
+		else if (vbat > 3600 || uisoc <= 30)
+			weak_hold = false;
+
+		if (vhigh_hold) {
+			charging = false;
+			g_battery_bypass_reason = 3; /* Over-voltage guard */
+			chr_err("[POX_BATT] health guard: VBAT %dmV over-voltage, charging held off\n", vbat);
+		} else if (vlow_hold || lowsoc_hold) {
+			charging = true;
+			g_battery_bypass_reason = 0; /* UVLO guard: keep VSYS supported */
+			if (g_battery_bypass_mode)
+				chr_err("[POX_BATT] health guard: soc %d vbat %dmV low, bypass deferred to avoid brownout freeze\n", uisoc, vbat);
+		} else if (weak_hold) {
+			charging = true;
+			g_battery_bypass_reason = 0; /* Aged/high-ESR sag: gentle charge, no path flapping */
+			if (g_battery_bypass_mode)
+				chr_err("[POX_BATT] health guard: weak sag soc %d vbat %dmV, bypass deferred for smooth power\n", uisoc, vbat);
+		} else if (g_battery_bypass_mode) {
 			charging = false;
 			g_battery_bypass_reason = 1; /* Manual Direct Power Bypass */
 		} else if (g_battery_charge_limit < 100 && uisoc >= g_battery_charge_limit) {

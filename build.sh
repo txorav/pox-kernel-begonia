@@ -404,11 +404,17 @@ if [ -d "\$RAMDISK" ]; then
 
     # 1. iOS-Style On-Demand Compressed Memory Management
     cat << 'RC_EOF' > \$RAMDISK/init.memory_enhanced.rc
-# iOS-style On-Demand Compressed Memory Management
+# Pox adaptive memory (HarmonyOS EROFS-cache + MGLRU lesson, 4.14-safe):
+# - swappiness 100: anon -> per-CPU zstd ZRAM (no LMK kills, 85% fewer kills lesson)
+# - watermark 100: 1% early kswapd fits 8.3ms frame budget (gaming raises to 150, powersave drops to 50)
+# - page-cluster 0: no swap readahead (ZRAM random; readahead wastes CPU/RAM)
+# - vfs pressure 50: retain dentries for instant launch (EROFS block-cache lesson)
+# - dirty 20/10: throughput (gaming tightens to 10/5 for latency)
+# Kernel gaming_mode switches these per-mode; boot sets balanced baseline.
 on boot
-    write /proc/sys/vm/watermark_scale_factor 10
-    write /proc/sys/vm/page-cluster 3
-    write /proc/sys/vm/vfs_cache_pressure 100
+    write /proc/sys/vm/watermark_scale_factor 100
+    write /proc/sys/vm/page-cluster 0
+    write /proc/sys/vm/vfs_cache_pressure 50
     write /proc/sys/vm/swappiness 100
     write /proc/sys/vm/dirty_ratio 20
     write /proc/sys/vm/dirty_background_ratio 10
@@ -432,9 +438,9 @@ on boot
 
 on property:sys.boot_completed=1
     write /sys/block/zram0/comp_algorithm zstd
-    write /proc/sys/vm/watermark_scale_factor 10
-    write /proc/sys/vm/page-cluster 3
-    write /proc/sys/vm/vfs_cache_pressure 100
+    write /proc/sys/vm/watermark_scale_factor 100
+    write /proc/sys/vm/page-cluster 0
+    write /proc/sys/vm/vfs_cache_pressure 50
     write /proc/sys/vm/swappiness 100
     write /proc/sys/vm/dirty_ratio 20
     write /proc/sys/vm/dirty_background_ratio 10
@@ -464,6 +470,9 @@ on boot
     chmod 0644 /sys/kernel/color_mode
     chmod 0644 /proc/perfmgr/hbm_mode
     chmod 0644 /sys/kernel/hbm_mode
+    # Pox standout safe-rootless torch: 0666 by design so stock
+    # flashlight apps work without root; hardware guards
+    # (325mA clamp, 20ms anti-strobe, 5-min timeout) in driver.
     chmod 0666 /proc/perfmgr/torch_brightness
     chmod 0666 /proc/perfmgr/flashlight_brightness
     chmod 0444 /proc/perfmgr/torch_info
@@ -475,7 +484,13 @@ on boot
     chmod 0644 /sys/kernel/camera_profile
     chmod 0644 /proc/perfmgr/slog3
     chmod 0644 /sys/kernel/slog3
-    chmod 0666 /dev/bus/usb
+    chmod 0644 /proc/perfmgr/camera_4k60
+    chmod 0644 /sys/kernel/camera_4k60
+    # Universal USB OTG: keep every adapter working plug-and-play.
+    # Directory needs +x to enumerate; device nodes stay world-
+    # accessible so DACs/serial/ethernet/iPhone tethering just work.
+    chmod 0755 /dev/bus/usb
+    chmod 0666 /dev/bus/usb/*/* 2>/dev/null || true
     chmod 0666 /dev/ttyUSB0
     chmod 0666 /dev/ttyUSB1
     chmod 0666 /dev/ttyUSB2
