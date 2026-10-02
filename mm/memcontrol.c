@@ -4048,6 +4048,116 @@ out_kfree:
 	return ret;
 }
 
+/*
+ * MIUI / HyperOS xswapd interface:
+ * MiuiIntegratedMemoryService.triggerSwap() controls memory swapping and
+ * compression quotas via /dev/memcg/memory.xswapd.quota.
+ */
+static u64 mem_cgroup_xswapd_quota_read(struct cgroup_subsys_state *css,
+					struct cftype *cft)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
+
+	return memcg ? memcg->xswapd_quota : 0;
+}
+
+static ssize_t mem_cgroup_xswapd_quota_write_file(struct kernfs_open_file *of,
+						  char *buf, size_t nbytes,
+						  loff_t off)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(of_css(of));
+	unsigned long long val = 0;
+	char *end;
+
+	if (!memcg)
+		return -EINVAL;
+
+	buf = strstrip(buf);
+	if (kstrtoull(buf, 0, &val)) {
+		val = memparse(buf, &end);
+		if (buf == end)
+			val = 0;
+	}
+
+	memcg->xswapd_quota = val;
+
+	if (val > 0) {
+		unsigned long nr_pages;
+
+		/* If value > 1MB, treat as bytes; else treat as pages */
+		if (val > (1UL << 20))
+			nr_pages = val >> PAGE_SHIFT;
+		else
+			nr_pages = val;
+
+		if (nr_pages > 0 && !mem_cgroup_is_root(memcg)) {
+			try_to_free_mem_cgroup_pages(memcg, nr_pages,
+						     GFP_KERNEL, true);
+		} else if (nr_pages > 0) {
+			lru_add_drain_all();
+		}
+	}
+
+	return nbytes;
+}
+
+static u64 mem_cgroup_xswapd_enable_read(struct cgroup_subsys_state *css,
+					 struct cftype *cft)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
+
+	return memcg ? memcg->xswapd_enable : 1;
+}
+
+static int mem_cgroup_xswapd_enable_write(struct cgroup_subsys_state *css,
+					  struct cftype *cft, u64 val)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
+
+	if (!memcg)
+		return -EINVAL;
+
+	memcg->xswapd_enable = val;
+	return 0;
+}
+
+static ssize_t mem_cgroup_xswapd_reclaim_write_file(struct kernfs_open_file *of,
+						    char *buf, size_t nbytes,
+						    loff_t off)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(of_css(of));
+	unsigned long long val = 0;
+	char *end;
+
+	if (!memcg)
+		return -EINVAL;
+
+	buf = strstrip(buf);
+	if (kstrtoull(buf, 0, &val)) {
+		val = memparse(buf, &end);
+		if (buf == end)
+			val = 0;
+	}
+
+	if (val > 0) {
+		unsigned long nr_pages;
+
+		if (val > (1UL << 20))
+			nr_pages = val >> PAGE_SHIFT;
+		else
+			nr_pages = val;
+
+		if (nr_pages > 0 && !mem_cgroup_is_root(memcg)) {
+			try_to_free_mem_cgroup_pages(memcg, nr_pages,
+						     GFP_KERNEL, true);
+		} else if (nr_pages > 0) {
+			lru_add_drain_all();
+		}
+	}
+
+	return nbytes;
+}
+
 static struct cftype mem_cgroup_legacy_files[] = {
 	{
 		.name = "usage_in_bytes",
@@ -4175,6 +4285,23 @@ static struct cftype mem_cgroup_legacy_files[] = {
 		.private = MEMFILE_PRIVATE(_TCP, RES_MAX_USAGE),
 		.write = mem_cgroup_reset,
 		.read_u64 = mem_cgroup_read_u64,
+	},
+	{
+		.name = "xswapd.quota",
+		.flags = CFTYPE_WORLD_WRITABLE,
+		.read_u64 = mem_cgroup_xswapd_quota_read,
+		.write = mem_cgroup_xswapd_quota_write_file,
+	},
+	{
+		.name = "xswapd.enable",
+		.flags = CFTYPE_WORLD_WRITABLE,
+		.read_u64 = mem_cgroup_xswapd_enable_read,
+		.write_u64 = mem_cgroup_xswapd_enable_write,
+	},
+	{
+		.name = "xswapd.reclaim",
+		.flags = CFTYPE_WORLD_WRITABLE,
+		.write = mem_cgroup_xswapd_reclaim_write_file,
 	},
 	{ },	/* terminate */
 };
@@ -4351,6 +4478,7 @@ static struct mem_cgroup *mem_cgroup_alloc(void)
 	INIT_LIST_HEAD(&memcg->event_list);
 	spin_lock_init(&memcg->event_list_lock);
 	memcg->socket_pressure = jiffies;
+	memcg->xswapd_enable = 1;
 #ifndef CONFIG_SLOB
 	memcg->kmemcg_id = -1;
 #endif
@@ -5538,6 +5666,23 @@ static struct cftype memory_files[] = {
 		.name = "stat",
 		.flags = CFTYPE_NOT_ON_ROOT,
 		.seq_show = memory_stat_show,
+	},
+	{
+		.name = "xswapd.quota",
+		.flags = CFTYPE_WORLD_WRITABLE,
+		.read_u64 = mem_cgroup_xswapd_quota_read,
+		.write = mem_cgroup_xswapd_quota_write_file,
+	},
+	{
+		.name = "xswapd.enable",
+		.flags = CFTYPE_WORLD_WRITABLE,
+		.read_u64 = mem_cgroup_xswapd_enable_read,
+		.write_u64 = mem_cgroup_xswapd_enable_write,
+	},
+	{
+		.name = "xswapd.reclaim",
+		.flags = CFTYPE_WORLD_WRITABLE,
+		.write = mem_cgroup_xswapd_reclaim_write_file,
 	},
 	{ }	/* terminate */
 };

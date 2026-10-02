@@ -281,6 +281,10 @@ struct mem_cgroup {
 	struct list_head event_list;
 	spinlock_t event_list_lock;
 
+	/* MIUI / HyperOS xswapd interface */
+	u64 xswapd_quota;
+	u64 xswapd_enable;
+
 	struct mem_cgroup_per_node *nodeinfo[0];
 	/* WARNING: nodeinfo must be the last member here */
 };

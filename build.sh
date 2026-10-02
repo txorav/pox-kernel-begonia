@@ -525,6 +525,15 @@ on boot
     write /proc/perfmgr/color_mode 1
     write /proc/perfmgr/fast_charge 1
 
+    # MIUI / HyperOS 3 memory swap & xswapd cgroup nodes
+    chmod 0666 /dev/memcg/memory.xswapd.quota
+    chmod 0666 /dev/memcg/memory.xswapd.enable
+    chmod 0666 /dev/memcg/memory.xswapd.reclaim
+    chmod 0666 /dev/memcg/apps/memory.xswapd.quota
+    chown root system /dev/memcg/memory.xswapd.quota
+    chown root system /dev/memcg/memory.xswapd.enable
+    chown root system /dev/memcg/memory.xswapd.reclaim
+
     # Default flash storage readahead to 128KB for smooth capture and I/O
     write /sys/block/sda/queue/read_ahead_kb 128
     write /sys/block/sdb/queue/read_ahead_kb 128
