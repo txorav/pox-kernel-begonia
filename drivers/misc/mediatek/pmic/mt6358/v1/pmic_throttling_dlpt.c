@@ -23,6 +23,7 @@
 #include <linux/iio/consumer.h>
 #include <linux/interrupt.h>
 #include <linux/jiffies.h>
+#include <linux/suspend.h>
 #include <linux/mfd/mt6358/core.h>
 
 #include <mt-plat/upmu_common.h>
@@ -133,8 +134,15 @@ void register_low_battery_notify(
  * POWER_INT1_VOLT under load. Each crossing re-runs every low-battery
  * consumer (PPM power budget -> big-cluster hotplug -> TEEI secure-core
  * switch which blocks on pm_sema), so a 2 Hz flap stalls the whole
- * system. Debounce de-escalation and same-level re-triggers; always let
- * escalation to a more severe level through immediately.
+ * system. Debounce the consumer fan-out; escalation to a more severe
+ * level is always delivered immediately.
+ *
+ * g_low_battery_level itself must NOT be debounced: it is an input to
+ * dlpt_check_power_off(), which is what shuts the board down for a dead
+ * cell. Debouncing the de-escalation path latches the state at level 2
+ * after the voltage has recovered, so a brief sag below POWER_INT1_VOLT
+ * keeps dlpt_check_power_off() counting and eventually forces a shutdown
+ * on a healthy battery.
  */
 #define LOW_BAT_DEBOUNCE_MS 30000
 
@@ -156,7 +164,7 @@ void exec_low_battery_callback(unsigned int thd)
 		else if (thd == POWER_INT2_VOLT)
 			low_battery_level = LOW_BATTERY_LEVEL_2;
 
-		if (low_battery_level <= g_low_battery_level && debounce_armed &&
+		if (low_battery_level > g_low_battery_level && debounce_armed &&
 		    time_before(jiffies, last_change +
 				msecs_to_jiffies(LOW_BAT_DEBOUNCE_MS))) {
 			pr_info("[%s] debounced: req lvl %d, hold lvl %d\n"
@@ -167,7 +175,13 @@ void exec_low_battery_callback(unsigned int thd)
 
 		last_change = jiffies;
 		debounce_armed = true;
+		/*
+		 * Track the real level even when the fan-out is debounced,
+		 * so the power-off detector sees a recovered cell.
+		 */
 		g_low_battery_level = low_battery_level;
+		if (low_battery_level != LOW_BATTERY_LEVEL_2)
+			g_low_battery_if_power_off = 0;
 		for (i = 0; i < ARRAY_SIZE(lbcb_tb); i++) {
 			if (lbcb_tb[i].lbcb != NULL)
 				lbcb_tb[i].lbcb(low_battery_level);
@@ -1154,15 +1168,32 @@ int dlpt_notify_handler(void *unused)
 				pr_info("[DLPT_POWER_OFF_EN] notify SOC=0 to power off, power_off_cnt=%d\n"
 					, power_off_cnt);
 
-				if (power_off_cnt >= 8) {
-					if (cur_ui_soc == 0) {
-						pr_info("[DLPT_POWER_OFF_EN] SOC is 0, power off system\n");
-						kernel_power_off();
-					} else {
-						pr_info("[DLPT_POWER_OFF_EN] SOC is %d > 0, suppress forced reboot\n",
-							cur_ui_soc);
-						power_off_cnt = 0;
-					}
+				/*
+				 * Restored MTK semantics: this is a forced
+				 * restart, not a power off, and it must be
+				 * serialised against any other shutdown.
+				 *
+				 * Calling kernel_power_off() from this kthread
+				 * used to start a full power-off while the rest
+				 * of the system was still live, and it did so
+				 * without taking pm_mutex.  Combined with the
+				 * low-battery debounce latching
+				 * g_low_battery_level, that turns a transient
+				 * voltage sag into a shutdown that races
+				 * whatever the user asked for -- a power off
+				 * comes back as a reboot and a reboot ends
+				 * up powering the board off.
+				 *
+				 * TODO: After kernel-4.19, pm_mutex change to
+				 * system_transition_mutex.
+				 */
+				if (power_off_cnt >= 4 &&
+				    READ_ONCE(system_state) == SYSTEM_RUNNING &&
+				    mutex_trylock(&pm_mutex)) {
+					pr_info("[DLPT_POWER_OFF_EN] forcing restart, cur_ui_soc=%d\n",
+						cur_ui_soc);
+					kernel_restart("DLPT reboot system");
+					mutex_unlock(&pm_mutex);
 				}
 			} else
 				power_off_cnt = 0;

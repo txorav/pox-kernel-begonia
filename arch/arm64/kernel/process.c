@@ -135,8 +135,29 @@ void machine_power_off(void)
 {
 	local_irq_disable();
 	smp_send_stop();
+
+	pr_emerg("machine_power_off: entry, pm_power_off=%p, system_state=%d\n",
+		 pm_power_off, READ_ONCE(system_state));
+
 	if (pm_power_off)
 		pm_power_off();
+
+	/*
+	 * pm_power_off() is not expected to return: the platform routine
+	 * hands control to firmware and the board stops executing here.
+	 *
+	 * Reaching this point means the shutdown sequence did NOT complete.
+	 * Returning used to fall back into __sys_reboot(), which then calls
+	 * do_exit(0) on the calling process.  When that process is init,
+	 * the kernel panics with "Attempted to kill init!", the MTK MRDUMP
+	 * handler runs, and the board comes back up in a reboot -- which is
+	 * exactly how a requested power off turns into a reboot.
+	 *
+	 * Stop here instead, loudly, so the failure is deterministic and
+	 * visible rather than silently converted into a panic/reboot.
+	 */
+	pr_emerg("machine_power_off: pm_power_off() RETURNED - power off FAILED, halting\n");
+	while (1);
 }
 
 /*
@@ -154,6 +175,10 @@ void machine_restart(char *cmd)
 	local_irq_disable();
 	smp_send_stop();
 
+	pr_emerg("machine_restart: entry, cmd=\"%s\", arm_pm_restart=%p, reboot_mode=%d, system_state=%d\n",
+		 cmd ? cmd : "", arm_pm_restart, reboot_mode,
+		 READ_ONCE(system_state));
+
 	/*
 	 * UpdateCapsule() depends on the system being reset via
 	 * ResetSystem().
@@ -161,7 +186,7 @@ void machine_restart(char *cmd)
 	if (efi_enabled(EFI_RUNTIME_SERVICES))
 		efi_reboot(reboot_mode, NULL);
 
-	/* Now call the architecture specific reboot code. */
+	/* Now call the architecture specific restart code. */
 	if (arm_pm_restart)
 		arm_pm_restart(reboot_mode, cmd);
 	else
@@ -170,7 +195,7 @@ void machine_restart(char *cmd)
 	/*
 	 * Whoops - the architecture was unable to reboot.
 	 */
-	printk("Reboot failed -- System halted\n");
+	pr_emerg("machine_restart: FAILED - no restart handler took effect, halting\n");
 	while (1);
 }
 

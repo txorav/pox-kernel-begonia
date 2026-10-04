@@ -269,13 +269,21 @@ static int get_set_conduit_method(struct device_node *np)
 #if !defined(CONFIG_MEDIATEK_WATCHDOG)
 static void psci_sys_reset(enum reboot_mode reboot_mode, const char *cmd)
 {
+	pr_emerg("psci: SYSTEM_RESET (0x%08x) via %s, cmd=\"%s\"\n",
+		 PSCI_0_2_FN_SYSTEM_RESET, invoke_psci_fn == __invoke_psci_fn_smc ?
+		 "smc" : "hvc", cmd ? cmd : "");
 	invoke_psci_fn(PSCI_0_2_FN_SYSTEM_RESET, 0, 0, 0);
+	pr_emerg("psci: SYSTEM_RESET returned - reset FAILED\n");
 }
 #endif
 
 static void psci_sys_poweroff(void)
 {
+	pr_emerg("psci: SYSTEM_OFF (0x%08x) via %s\n",
+		 PSCI_0_2_FN_SYSTEM_OFF, invoke_psci_fn == __invoke_psci_fn_smc ?
+		 "smc" : "hvc");
 	invoke_psci_fn(PSCI_0_2_FN_SYSTEM_OFF, 0, 0, 0);
+	pr_emerg("psci: SYSTEM_OFF returned - power off FAILED\n");
 }
 
 static int __init psci_features(u32 psci_func_id)
