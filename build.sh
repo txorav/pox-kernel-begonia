@@ -562,6 +562,18 @@ on boot
     write /sys/block/mmcblk0/queue/nomerges 0
     write /sys/block/mmcblk0/queue/nr_requests 128
 
+    # Flash storage health permissions
+    chmod 0444 /proc/ufs_health
+    chmod 0444 /sys/bus/platform/devices/11270000.ufshci/dump_health
+    chmod 0444 /sys/bus/platform/devices/11270000.ufshci/health
+    chmod 0444 /sys/bus/platform/devices/11270000.ufshci/health_remaining_pct
+    chmod 0444 /sys/bus/platform/devices/11270000.ufshci/life_time_a
+    chmod 0444 /sys/bus/platform/devices/11270000.ufshci/life_time_b
+    chmod 0444 /sys/bus/platform/devices/11270000.ufshci/pre_eol_info
+    chmod 0444 /sys/bus/platform/devices/11270000.ufshci/product_name
+    chmod 0444 /sys/bus/platform/devices/11270000.ufshci/product_revision
+    chmod 0444 /sys/bus/platform/devices/11270000.ufshci/manufacturer_id
+
 # ROM Performance Mode / Game Space Active
 on property:persist.sys.power_mode_perf=1
     write /proc/perfmgr/gaming_mode 1

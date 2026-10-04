@@ -326,6 +326,9 @@ static inline bool ufshcd_valid_tag(struct ufs_hba *hba, int tag)
 	return tag >= 0 && tag < hba->nutrs;
 }
 
+struct ufs_hba *ufs_primary_hba = NULL;
+EXPORT_SYMBOL_GPL(ufs_primary_hba);
+
 static inline void ufshcd_enable_irq(struct ufs_hba *hba)
 {
 	if (!hba->is_irq_enabled) {
@@ -8046,6 +8049,30 @@ _link_retry:
 
 	/* set the state as operational after switching to desired gear */
 	hba->ufshcd_state = UFSHCD_STATE_OPERATIONAL;
+	ufs_primary_hba = hba;
+	{
+		u8 desc[QUERY_DESC_HEALTH_MAX_SIZE];
+		int h_err;
+
+		pm_runtime_get_sync(hba->dev);
+		h_err = ufshcd_read_health_desc(hba, desc, QUERY_DESC_HEALTH_MAX_SIZE);
+		pm_runtime_put_sync(hba->dev);
+
+		if (!h_err) {
+			int pct = 100;
+
+			if (desc[4] >= 1 && desc[4] <= 10)
+				pct = 100 - ((desc[4] - 1) * 10 + 5);
+			else if (desc[4] > 10)
+				pct = 0;
+
+			pr_info("[UFS_HEALTH] Pre-EOL: 0x%02x, LifeTimeA (SLC): 0x%02x, LifeTimeB (TLC): 0x%02x, Health: %d%%\n",
+				desc[2], desc[3], desc[4], pct);
+			if (hba->card)
+				pr_info("[UFS_HEALTH] Model: %s, Rev: %s, Manufacturer: 0x%04x\n",
+					hba->card->model, hba->card->prl, hba->card->wmanufacturerid);
+		}
+	}
 
 	/*
 	 * If we are in error handling context or in power management callbacks
@@ -9632,14 +9659,252 @@ static void ufshcd_add_spm_lvl_sysfs_nodes(struct ufs_hba *hba)
 		dev_err(hba->dev, "Failed to create sysfs for spm_lvl\n");
 }
 
+int ufshcd_get_health_descriptor(u8 *desc_buf, int size)
+{
+	int err;
+
+	if (!ufs_primary_hba)
+		return -ENODEV;
+
+	pm_runtime_get_sync(ufs_primary_hba->dev);
+	err = ufshcd_read_health_desc(ufs_primary_hba, desc_buf, size);
+	pm_runtime_put_sync(ufs_primary_hba->dev);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(ufshcd_get_health_descriptor);
+
+int ufshcd_get_device_info(char *model, char *rev, u16 *manf_id)
+{
+	if (!ufs_primary_hba || !ufs_primary_hba->card)
+		return -ENODEV;
+
+	if (model)
+		strlcpy(model, ufs_primary_hba->card->model, 40);
+	if (rev)
+		strlcpy(rev, ufs_primary_hba->card->prl, 16);
+	if (manf_id)
+		*manf_id = ufs_primary_hba->card->wmanufacturerid;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(ufshcd_get_device_info);
+
+/*
+ * UFS Health & Disk Information Sysfs Interface:
+ * Exposes JEDEC UFS Health Descriptor and device metadata to userspace and
+ * Android storaged / health HAL.
+ */
+static ssize_t ufs_dump_health_show(struct device *dev,
+				    struct device_attribute *attr, char *buf)
+{
+	struct ufs_hba *hba = dev_get_drvdata(dev);
+	u8 desc_buf[QUERY_DESC_HEALTH_MAX_SIZE];
+	int err;
+
+	if (!hba)
+		return -EINVAL;
+
+	pm_runtime_get_sync(hba->dev);
+	err = ufshcd_read_health_desc(hba, desc_buf, QUERY_DESC_HEALTH_MAX_SIZE);
+	pm_runtime_put_sync(hba->dev);
+
+	if (err)
+		return sprintf(buf, "Reading Health Descriptor failed: %d\n", err);
+
+	return snprintf(buf, PAGE_SIZE,
+			"Health Descriptor[offset 0x02]: bPreEOLInfo = 0x%02x\n"
+			"Health Descriptor[offset 0x03]: bDeviceLifeTimeEstA = 0x%02x\n"
+			"Health Descriptor[offset 0x04]: bDeviceLifeTimeEstB = 0x%02x\n",
+			desc_buf[2], desc_buf[3], desc_buf[4]);
+}
+static DEVICE_ATTR(dump_health, 0444, ufs_dump_health_show, NULL);
+
+static ssize_t ufs_health_show(struct device *dev,
+			       struct device_attribute *attr, char *buf)
+{
+	struct ufs_hba *hba = dev_get_drvdata(dev);
+	u8 desc_buf[QUERY_DESC_HEALTH_MAX_SIZE];
+	int err;
+
+	if (!hba)
+		return -EINVAL;
+
+	pm_runtime_get_sync(hba->dev);
+	err = ufshcd_read_health_desc(hba, desc_buf, QUERY_DESC_HEALTH_MAX_SIZE);
+	pm_runtime_put_sync(hba->dev);
+
+	if (err)
+		return sprintf(buf, "Error: %d\n", err);
+
+	return snprintf(buf, PAGE_SIZE,
+			"eol_info: 0x%02x\n"
+			"life_time_a: 0x%02x\n"
+			"life_time_b: 0x%02x\n",
+			desc_buf[2], desc_buf[3], desc_buf[4]);
+}
+static DEVICE_ATTR(health, 0444, ufs_health_show, NULL);
+
+static ssize_t ufs_life_time_a_show(struct device *dev,
+				    struct device_attribute *attr, char *buf)
+{
+	struct ufs_hba *hba = dev_get_drvdata(dev);
+	u8 desc_buf[QUERY_DESC_HEALTH_MAX_SIZE];
+	int err;
+
+	if (!hba)
+		return -EINVAL;
+
+	pm_runtime_get_sync(hba->dev);
+	err = ufshcd_read_health_desc(hba, desc_buf, QUERY_DESC_HEALTH_MAX_SIZE);
+	pm_runtime_put_sync(hba->dev);
+
+	if (err)
+		return sprintf(buf, "0x00\n");
+
+	return sprintf(buf, "0x%02x\n", desc_buf[3]);
+}
+static DEVICE_ATTR(life_time_a, 0444, ufs_life_time_a_show, NULL);
+
+static ssize_t ufs_life_time_b_show(struct device *dev,
+				    struct device_attribute *attr, char *buf)
+{
+	struct ufs_hba *hba = dev_get_drvdata(dev);
+	u8 desc_buf[QUERY_DESC_HEALTH_MAX_SIZE];
+	int err;
+
+	if (!hba)
+		return -EINVAL;
+
+	pm_runtime_get_sync(hba->dev);
+	err = ufshcd_read_health_desc(hba, desc_buf, QUERY_DESC_HEALTH_MAX_SIZE);
+	pm_runtime_put_sync(hba->dev);
+
+	if (err)
+		return sprintf(buf, "0x00\n");
+
+	return sprintf(buf, "0x%02x\n", desc_buf[4]);
+}
+static DEVICE_ATTR(life_time_b, 0444, ufs_life_time_b_show, NULL);
+
+static ssize_t ufs_pre_eol_info_show(struct device *dev,
+				     struct device_attribute *attr, char *buf)
+{
+	struct ufs_hba *hba = dev_get_drvdata(dev);
+	u8 desc_buf[QUERY_DESC_HEALTH_MAX_SIZE];
+	int err;
+
+	if (!hba)
+		return -EINVAL;
+
+	pm_runtime_get_sync(hba->dev);
+	err = ufshcd_read_health_desc(hba, desc_buf, QUERY_DESC_HEALTH_MAX_SIZE);
+	pm_runtime_put_sync(hba->dev);
+
+	if (err)
+		return sprintf(buf, "0x00\n");
+
+	return sprintf(buf, "0x%02x\n", desc_buf[2]);
+}
+static DEVICE_ATTR(pre_eol_info, 0444, ufs_pre_eol_info_show, NULL);
+
+static ssize_t ufs_product_name_show(struct device *dev,
+				     struct device_attribute *attr, char *buf)
+{
+	struct ufs_hba *hba = dev_get_drvdata(dev);
+
+	if (!hba || !hba->card)
+		return -EINVAL;
+
+	return sprintf(buf, "%s\n", hba->card->model);
+}
+static DEVICE_ATTR(product_name, 0444, ufs_product_name_show, NULL);
+
+static ssize_t ufs_product_revision_show(struct device *dev,
+					 struct device_attribute *attr, char *buf)
+{
+	struct ufs_hba *hba = dev_get_drvdata(dev);
+
+	if (!hba || !hba->card)
+		return -EINVAL;
+
+	return sprintf(buf, "%s\n", hba->card->prl);
+}
+static DEVICE_ATTR(product_revision, 0444, ufs_product_revision_show, NULL);
+
+static ssize_t ufs_manufacturer_id_show(struct device *dev,
+					struct device_attribute *attr, char *buf)
+{
+	struct ufs_hba *hba = dev_get_drvdata(dev);
+
+	if (!hba || !hba->card)
+		return -EINVAL;
+
+	return sprintf(buf, "0x%04x\n", hba->card->wmanufacturerid);
+}
+static DEVICE_ATTR(manufacturer_id, 0444, ufs_manufacturer_id_show, NULL);
+
+static ssize_t ufs_health_remaining_pct_show(struct device *dev,
+					     struct device_attribute *attr, char *buf)
+{
+	struct ufs_hba *hba = dev_get_drvdata(dev);
+	u8 desc_buf[QUERY_DESC_HEALTH_MAX_SIZE];
+	int err, pct;
+
+	if (!hba)
+		return -EINVAL;
+
+	pm_runtime_get_sync(hba->dev);
+	err = ufshcd_read_health_desc(hba, desc_buf, QUERY_DESC_HEALTH_MAX_SIZE);
+	pm_runtime_put_sync(hba->dev);
+
+	if (err || desc_buf[4] == 0)
+		return sprintf(buf, "100\n");
+
+	if (desc_buf[4] >= 1 && desc_buf[4] <= 10)
+		pct = 100 - ((desc_buf[4] - 1) * 10 + 5);
+	else
+		pct = 0;
+
+	return sprintf(buf, "%d\n", pct);
+}
+static DEVICE_ATTR(health_remaining_pct, 0444, ufs_health_remaining_pct_show, NULL);
+
 static inline void ufshcd_add_sysfs_nodes(struct ufs_hba *hba)
 {
 	ufshcd_add_rpm_lvl_sysfs_nodes(hba);
 	ufshcd_add_spm_lvl_sysfs_nodes(hba);
+	if (device_create_file(hba->dev, &dev_attr_dump_health))
+		dev_err(hba->dev, "Failed to create sysfs for dump_health\n");
+	if (device_create_file(hba->dev, &dev_attr_health))
+		dev_err(hba->dev, "Failed to create sysfs for health\n");
+	if (device_create_file(hba->dev, &dev_attr_life_time_a))
+		dev_err(hba->dev, "Failed to create sysfs for life_time_a\n");
+	if (device_create_file(hba->dev, &dev_attr_life_time_b))
+		dev_err(hba->dev, "Failed to create sysfs for life_time_b\n");
+	if (device_create_file(hba->dev, &dev_attr_pre_eol_info))
+		dev_err(hba->dev, "Failed to create sysfs for pre_eol_info\n");
+	if (device_create_file(hba->dev, &dev_attr_product_name))
+		dev_err(hba->dev, "Failed to create sysfs for product_name\n");
+	if (device_create_file(hba->dev, &dev_attr_product_revision))
+		dev_err(hba->dev, "Failed to create sysfs for product_revision\n");
+	if (device_create_file(hba->dev, &dev_attr_manufacturer_id))
+		dev_err(hba->dev, "Failed to create sysfs for manufacturer_id\n");
+	if (device_create_file(hba->dev, &dev_attr_health_remaining_pct))
+		dev_err(hba->dev, "Failed to create sysfs for health_remaining_pct\n");
 }
 
 static inline void ufshcd_remove_sysfs_nodes(struct ufs_hba *hba)
 {
+	device_remove_file(hba->dev, &dev_attr_dump_health);
+	device_remove_file(hba->dev, &dev_attr_health);
+	device_remove_file(hba->dev, &dev_attr_life_time_a);
+	device_remove_file(hba->dev, &dev_attr_life_time_b);
+	device_remove_file(hba->dev, &dev_attr_pre_eol_info);
+	device_remove_file(hba->dev, &dev_attr_product_name);
+	device_remove_file(hba->dev, &dev_attr_product_revision);
+	device_remove_file(hba->dev, &dev_attr_manufacturer_id);
+	device_remove_file(hba->dev, &dev_attr_health_remaining_pct);
 	device_remove_file(hba->dev, &hba->rpm_lvl_attr);
 	device_remove_file(hba->dev, &hba->spm_lvl_attr);
 }
