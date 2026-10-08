@@ -84,6 +84,17 @@ static bool dual_swchg_check_pd_leave(struct charger_manager *info)
 {
 	struct mtk_pdc *pd = &info->pdc;
 	int ichg = 0;
+	extern int pox_fast_charge_get(void);
+
+	/* Pox 18W fast charging: keep dual-switch active on PD adapters
+	 * while battery temperature is safe (<48C), preventing premature
+	 * drop to 9-10W single-charger mode. */
+	if (pox_fast_charge_get() && info->battery_temp < 480) {
+		extern int battery_get_bat_voltage(void);
+		if (battery_get_bat_voltage() < 3500)
+			return true;
+		return false;
+	}
 
 	if (pd->pd_cap_max_watt < 10000000)
 		return true;
@@ -115,7 +126,8 @@ static bool check_start_dual_charging_status(struct charger_manager *info)
 	if (pox_fast_charge_get() &&
 	    (info->chr_type == STANDARD_CHARGER ||
 	     info->chr_type == NONSTANDARD_CHARGER ||
-	     info->chr_type == APPLE_2_1A_CHARGER) &&
+	     info->chr_type == APPLE_2_1A_CHARGER ||
+	     mtk_pdc_check_charger(info)) &&
 	    info->battery_temp < 480) {
 		extern int battery_get_bat_voltage(void);
 		if (battery_get_bat_voltage() < 3500)
@@ -318,13 +330,13 @@ dual_swchg_select_charging_current_limit(struct charger_manager *info)
 			switch (swchgalg->state) {
 			case CHR_CC:
 				pdata->charging_current_limit
-					= info->data.chg1_ta_ac_charger_current;
+					= pox_fast_charge_get() ? 2200000 : info->data.chg1_ta_ac_charger_current;
 				pdata2->charging_current_limit
-					= info->data.chg2_ta_ac_charger_current;
+					= pox_fast_charge_get() ? 2000000 : info->data.chg2_ta_ac_charger_current;
 				break;
 			case CHR_TUNING:
 				pdata->charging_current_limit
-					= info->data.chg1_ta_ac_charger_current;
+					= pox_fast_charge_get() ? 2200000 : info->data.chg1_ta_ac_charger_current;
 				break;
 			default:
 				break;
@@ -898,7 +910,7 @@ static void dual_swchg_turn_on_charging(struct charger_manager *info)
 			if (mtk_pdc_check_charger(info)) {
 				if (info->chg1_data.thermal_charging_current_limit == -1) {
 					charger_dev_set_charging_current(info->chg1_dev,
-						info->data.pd_charger_current);
+						pox_fast_charge_get() ? 2200000 : info->data.pd_charger_current);
 				}
 			}
 
