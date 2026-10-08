@@ -1999,7 +1999,7 @@ static int prctl_set_mm_map(int opt, const void __user *addr, unsigned long data
 		 * arbitrary program as any executable, even setuid ones.
 		 * This may have implications in the tomoyo subsystem.
 		 */
-		if (!checkpoint_restore_ns_capable(current_user_ns()))
+		if (!ns_capable(current_user_ns(), CAP_SYS_ADMIN))
 			return -EPERM;
 
 		error = prctl_set_mm_exe_file(mm, prctl_map.exe_fd);
