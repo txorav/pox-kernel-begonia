@@ -62,6 +62,11 @@ if [[ -z "${VERSION_NAME:-}" ]]; then
             BRANCH_DESC="Zero Frame-Drop Gaming & KernelSU-Next Edition"
             DEFAULT_DEFCONFIG="begonia_apatch_defconfig"
             ;;
+        onyx-kaeru*|*kaeru*)
+            VERSION_NAME="Onyx-Kaeru"
+            BRANCH_DESC="Zero Frame-Drop Gaming & Kaeru Bootloader Edition"
+            DEFAULT_DEFCONFIG="begonia_user_defconfig"
+            ;;
         main|granite)
             VERSION_NAME="Granite"
             BRANCH_DESC="Rock-Solid Stability Edition"
@@ -106,7 +111,7 @@ warn() { printf '\033[1;33m[!] %s\033[0m\n' "$*"; }
 err()  { printf '\033[1;31m[-] %s\033[0m\n' "$*"; }
 
 # 1. Ensure kerdevdep is bootstrapped
-if [[ ! -f "$KERDEVDEP/env.sh" || ! -x "$KERDEVDEP/clang/bin/clang" || ! -x "$KERDEVDEP/bin/ccache" ]]; then
+if [[ ! -f "$KERDEVDEP/env.sh" || ! -x "$KERDEVDEP/clang/bin/clang" ]]; then
     log "Bootstrapping self-contained dependencies in $KERDEVDEP ..."
     bash "$KERDEVDEP/setup_kerdevdep.sh"
 fi
@@ -209,7 +214,7 @@ build_kernel() {
     log "================================================="
 
     local bcc="$CC"
-    if command -v ccache >/dev/null 2>&1 && [[ "${CCACHE:-1}" == "1" ]]; then
+    if [[ "${CCACHE:-1}" == "1" ]] && ccache -V >/dev/null 2>&1; then
         bcc="ccache $CC"
         export CCACHE_DIR="${CCACHE_DIR:-$BUILD_DIR/.ccache}"
         mkdir -p "$CCACHE_DIR"
@@ -258,9 +263,16 @@ build_kernel() {
         done
     fi
 
+    # Ensure stale in-tree headers do not conflict with O= builds
+    rm -rf "$ROOT_DIR/include/config" "$ROOT_DIR/include/generated"
+
     log "Starting kernel compilation (nice priority, jobs: $JOBS)..."
+    local nice_cmd="nice -n ${NICE_LEVEL:-19}"
+    if command -v ionice >/dev/null 2>&1; then
+        nice_cmd="$nice_cmd ionice -c 3"
+    fi
     # shellcheck disable=SC2086
-    nice -n 10 make O="$OUT_DIR" ARCH="$ARCH" CC="$bcc" \
+    $nice_cmd make O="$OUT_DIR" ARCH="$ARCH" CC="$bcc" \
         CLANG_TRIPLE="$CLANG_TRIPLE" CROSS_COMPILE="$CROSS_COMPILE" \
         $EXTRA_FLAGS -j"$JOBS"
 
@@ -341,6 +353,22 @@ package_zip() {
         git log -n 15 --pretty=format:"* %h (%cd) - %s%n  Author: %an%n%b" --date=short 2>/dev/null || git log -n 5 2>/dev/null || true
     } > "$stage/CHANGELOG.txt"
 
+    local feature_desc="APatch / KernelPatch ready"
+    case "$VERSION_NAME" in
+        Onyx-Kaeru)
+            feature_desc="Kaeru Bootloader & Merged DTB ready"
+            ;;
+        Onyx-ReSukiSu)
+            feature_desc="ReSukiSu & SuSFS ready"
+            ;;
+        Onyx-KSU-Next)
+            feature_desc="KernelSU-Next ready"
+            ;;
+        Onyx)
+            feature_desc="Unrooted Performance Edition"
+            ;;
+    esac
+
     cat << AK_EOF > "$stage/anykernel.sh"
 # AnyKernel3 Ramdisk Mod Script
 # osm0sis @ xda-developers
@@ -391,7 +419,7 @@ ui_print "                   not for anything else.    ";
 ui_print "  * Linux Ver    : $kver                     ";
 ui_print "  * Build Date   : $COMMIT_DATE              ";
 ui_print "  * Toolchain    : $toolchain_ver            ";
-ui_print "  * Features     : APatch / KernelPatch ready";
+ui_print "  * Features     : ${feature_desc}           ";
 ui_print "  * Crypto Engine: ARMv8 CE & NEON Accelerated";
 ui_print "  * Mem Engine   : iOS-Style On-Demand ZRAM  ";
 ui_print "  * Game Engine  : Zero Frame-Drop Gaming Mode";
@@ -784,6 +812,15 @@ install_device() {
         exit 1
     fi
 
+    if [[ -z "${ANDROID_SERIAL:-}" ]]; then
+        local target_dev
+        target_dev=$(adb devices | awk '$2=="recovery" || $2=="device" {print $1}' | grep "hitsfmamp7pb8xlz" || adb devices | awk '$2=="recovery" || $2=="device" {print $1}' | head -n 1)
+        if [[ -n "$target_dev" ]]; then
+            export ANDROID_SERIAL="$target_dev"
+            log "Target ADB device selected: $ANDROID_SERIAL"
+        fi
+    fi
+
     local dev_state
     dev_state=$(adb get-state 2>/dev/null || echo "offline")
     if [[ "$dev_state" != "device" && "$dev_state" != "recovery" ]]; then
@@ -796,10 +833,14 @@ install_device() {
     adb push "$zip_file" "/sdcard/latest.zip"
     adb push "$zip_file" "/sdcard/Pox-Kernel-latest.zip"
 
-    log "Kernel zip installed to /sdcard/ on device!"
+    log "Kernel zip pushed to /sdcard/ on device!"
     log "  - /sdcard/$(basename "$zip_file")"
-    log "  - /sdcard/latest.zip"
-    log "  - /sdcard/Pox-Kernel-latest.zip"
+
+    if [[ "$dev_state" == "recovery" ]]; then
+        log "Flashing kernel zip automatically via TWRP..."
+        adb shell twrp install "/sdcard/$(basename "$zip_file")"
+        log "Kernel successfully flashed to boot partition!"
+    fi
 }
 
 case "$ACTION" in

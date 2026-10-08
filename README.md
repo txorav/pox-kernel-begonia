@@ -101,7 +101,11 @@ Pox Kernel releases are categorized into distinct **Rock Editions**, designed to
 |:---|:---|:---:|:---|
 | **`main`** / **`granite`** | **Granite** | `0.9` | Official stable release branch with core stability fixes |
 | **`obsidian`** | **Obsidian** | `0.9` | Granite + iOS-Style compressed memory engine |
-| **`onyx`** | **Onyx** | `0.9` | Obsidian + Zero Frame-Drop Gaming Controller |
+| **`onyx`** | **Onyx** | `0.9` | Obsidian + Zero Frame-Drop Gaming Controller (Unrooted) |
+| **`onyx-apatch`** | **Onyx-APatch** | `0.9` | Onyx + APatch & KernelPatch ready (`CONFIG_KALLSYMS_ALL=y`) |
+| **`onyx-ksu-next`** | **Onyx-KSU-Next** | `0.9` | Onyx + KernelSU-Next v3.3.0 integration |
+| **`onyx-resukisu`** | **Onyx-ReSukiSu** | `0.9` | Onyx + ReSukiSu v4.2.0 + SuSFS v2.3.0 + NoMount 2.0.0 |
+| **`onyx-kaeru`** | **Onyx-Kaeru** | `0.9` | Onyx + Kaeru Bootloader compatibility & Standalone Merged DTB |
 
 ---
 
