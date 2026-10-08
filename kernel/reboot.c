@@ -213,6 +213,21 @@ void migrate_to_reboot_cpu(void)
  */
 void kernel_restart(char *cmd)
 {
+	/*
+	 * Only one shutdown sequence may ever be in flight.  device_shutdown()
+	 * and syscore_shutdown() are not re-entrant: a second walker (e.g. the
+	 * MTK DLPT low-battery thread racing init, or a panic path racing init)
+	 * tears the PMIC/charger/storage stack down a second time on top of the
+	 * first, and the board then latches off in the wrong state -- a reboot
+	 * ends up powering the device off and a power off ends up rebooting it.
+	 */
+	if (READ_ONCE(system_state) >= SYSTEM_HALT) {
+		pr_emerg("kernel_restart: shutdown already in progress (system_state=%d), ignoring\n",
+			 system_state);
+		while (1)
+			;
+	}
+
 	kernel_restart_prepare(cmd);
 	migrate_to_reboot_cpu();
 	syscore_shutdown();
@@ -247,6 +262,13 @@ static void kernel_shutdown_prepare(enum system_states state)
  */
 void kernel_halt(void)
 {
+	if (READ_ONCE(system_state) >= SYSTEM_HALT) {
+		pr_emerg("kernel_halt: shutdown already in progress (system_state=%d), ignoring\n",
+			 system_state);
+		while (1)
+			;
+	}
+
 	kernel_shutdown_prepare(SYSTEM_HALT);
 	migrate_to_reboot_cpu();
 	syscore_shutdown();
@@ -263,6 +285,18 @@ EXPORT_SYMBOL_GPL(kernel_halt);
  */
 void kernel_power_off(void)
 {
+	/*
+	 * See kernel_restart(): refuse to walk the shutdown sequence twice.
+	 * A power off that is entered while a reboot is already tearing the
+	 * board down is what makes "reboot" end in a power off and vice versa.
+	 */
+	if (READ_ONCE(system_state) >= SYSTEM_HALT) {
+		pr_emerg("kernel_power_off: shutdown already in progress (system_state=%d), ignoring\n",
+			 system_state);
+		while (1)
+			;
+	}
+
 	kernel_shutdown_prepare(SYSTEM_POWER_OFF);
 	if (pm_power_off_prepare)
 		pm_power_off_prepare();
