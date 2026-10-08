@@ -74,7 +74,7 @@ if [[ -z "${VERSION_NAME:-}" ]]; then
             ;;
         gaming|onyx|*)
             VERSION_NAME="Onyx"
-            BRANCH_DESC="Zero Frame-Drop Gaming Edition"
+            BRANCH_DESC="Zero Frame-Drop Gaming Edition (Unrooted)"
             DEFAULT_DEFCONFIG="begonia_user_defconfig"
             ;;
     esac
