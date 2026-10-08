@@ -99,8 +99,8 @@ jobs:
               ;;
             onyx|*)
               EDITION="Onyx"
-              EDITION_DESC="Zero Frame-Drop Gaming Edition"
-              ROOT_INFO="Standard Edition (KernelPatch / APatch Ready)"
+              EDITION_DESC="Zero Frame-Drop Gaming Edition (Unrooted)"
+              ROOT_INFO="None (Strictly Unrooted - Pure Stock Play Integrity)"
               ;;
           esac
 
@@ -134,7 +134,6 @@ jobs:
           - **SoC**: MediaTek MT6785 / Helio G90T
           - **Linux Version**: 4.14.357 LTS
           - **Toolchain**: Google Android Clang 11.0.1 (r383902) + GCC 4.9 AArch64
-          - **APatch / KernelPatch**: Supported (\`CONFIG_KALLSYMS_ALL=y\`, \`CONFIG_KPROBES=y\`, \`CONFIG_OVERLAY_FS_REDIRECT_DIR=y\`)
 
           ### Release Assets
           - **Flashable Recovery ZIP**: \`${{ env.ZIP_NAME }}\` (Install via TWRP / OrangeFox)
