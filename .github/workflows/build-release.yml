@@ -72,17 +72,35 @@ jobs:
 
           BRANCH_NAME="${{ github.ref_name }}"
           case "$BRANCH_NAME" in
+            onyx-resukisu*|*resukisu*)
+              EDITION="Onyx-ReSukiSu"
+              EDITION_DESC="Zero Frame-Drop Gaming & ReSukiSu Ultra Edition"
+              ROOT_INFO="ReSukiSu v4.2.0 (40901) + SuSFS v2.3.0 + NoMount 2.0.0 (Multi-Manager, App Profile, SELinux Hide)"
+              ;;
+            onyx-apatch*|*apatch*)
+              EDITION="Onyx-APatch"
+              EDITION_DESC="Zero Frame-Drop Gaming & APatch Edition"
+              ROOT_INFO="APatch / KernelPatch Supported (CONFIG_KALLSYMS_ALL=y, CONFIG_KPROBES=y, OverlayFS redirect & index)"
+              ;;
+            onyx-ksu-next*|*ksu-next*)
+              EDITION="Onyx-KSU-Next"
+              EDITION_DESC="Zero Frame-Drop Gaming & KernelSU-Next Edition"
+              ROOT_INFO="KernelSU-Next v3.3.0 + NoMount VFS"
+              ;;
             main|granite)
               EDITION="Granite"
               EDITION_DESC="Rock-Solid Stability Edition"
+              ROOT_INFO="Standard Edition (KernelPatch / APatch Ready)"
               ;;
             obsidian)
               EDITION="Obsidian"
               EDITION_DESC="iOS-Style Compressed Memory Edition"
+              ROOT_INFO="Standard Edition (KernelPatch / APatch Ready)"
               ;;
             onyx|*)
               EDITION="Onyx"
               EDITION_DESC="Zero Frame-Drop Gaming Edition"
+              ROOT_INFO="Standard Edition (KernelPatch / APatch Ready)"
               ;;
           esac
 
@@ -96,6 +114,7 @@ jobs:
           echo "RELEASE_TITLE=$RELEASE_TITLE" >> $GITHUB_ENV
           echo "EDITION=$EDITION" >> $GITHUB_ENV
           echo "EDITION_DESC=$EDITION_DESC" >> $GITHUB_ENV
+          echo "ROOT_INFO=$ROOT_INFO" >> $GITHUB_ENV
           echo "COMMIT_SHORT=$COMMIT_SHORT" >> $GITHUB_ENV
 
       - name: Generate Release Notes
@@ -107,6 +126,7 @@ jobs:
 
           ### Release Information
           - **Edition**: ${{ env.EDITION }} (${{ env.EDITION_DESC }})
+          - **Root Support**: ${{ env.ROOT_INFO }}
           - **Version**: 0.9
           - **Branch**: \`${{ github.ref_name }}\`
           - **Commit**: \`${{ env.COMMIT_SHORT }}\`
@@ -114,7 +134,7 @@ jobs:
           - **SoC**: MediaTek MT6785 / Helio G90T
           - **Linux Version**: 4.14.357 LTS
           - **Toolchain**: Google Android Clang 11.0.1 (r383902) + GCC 4.9 AArch64
-          - **APatch / KernelPatch**: Supported (\`CONFIG_KALLSYMS_ALL=y\`)
+          - **APatch / KernelPatch**: Supported (\`CONFIG_KALLSYMS_ALL=y\`, \`CONFIG_KPROBES=y\`, \`CONFIG_OVERLAY_FS_REDIRECT_DIR=y\`)
 
           ### Release Assets
           - **Flashable Recovery ZIP**: \`${{ env.ZIP_NAME }}\` (Install via TWRP / OrangeFox)

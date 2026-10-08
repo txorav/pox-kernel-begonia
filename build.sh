@@ -19,7 +19,7 @@ KERNEL_VERSION="${KERNEL_VERSION:-0.9}"
 DEVICE_NAME="${DEVICE_NAME:-Redmi Note 8 Pro}"
 DEVICE_CODENAME="${DEVICE_CODENAME:-begonia}"
 MAINTAINER="${MAINTAINER:-TXO R (Pox Project)}"
-DEFCONFIG="${DEFCONFIG:-begonia_apatch_defconfig}"
+DEFCONFIG="${DEFCONFIG:-}"
 
 # Determine safe parallel jobs based on available RAM and load to protect host PC from freezing
 auto_jobs() {
@@ -47,22 +47,42 @@ COMMIT_SUBJECT="$(git log -1 --format=%s 2>/dev/null || echo "Release build")"
 # Version Name / Codename (Rocks theme: Granite, Obsidian, Onyx)
 if [[ -z "${VERSION_NAME:-}" ]]; then
     case "$GIT_BRANCH" in
+        onyx-resukisu*|*resukisu*)
+            VERSION_NAME="Onyx-ReSukiSu"
+            BRANCH_DESC="Zero Frame-Drop Gaming & ReSukiSu Ultra Edition"
+            DEFAULT_DEFCONFIG="begonia_user_ksu_defconfig"
+            ;;
+        onyx-apatch*|*apatch*)
+            VERSION_NAME="Onyx-APatch"
+            BRANCH_DESC="Zero Frame-Drop Gaming & APatch Edition"
+            DEFAULT_DEFCONFIG="begonia_apatch_defconfig"
+            ;;
+        onyx-ksu-next*|*ksu-next*)
+            VERSION_NAME="Onyx-KSU-Next"
+            BRANCH_DESC="Zero Frame-Drop Gaming & KernelSU-Next Edition"
+            DEFAULT_DEFCONFIG="begonia_apatch_defconfig"
+            ;;
         main|granite)
             VERSION_NAME="Granite"
             BRANCH_DESC="Rock-Solid Stability Edition"
+            DEFAULT_DEFCONFIG="begonia_user_defconfig"
             ;;
         memory-enhanced|obsidian)
             VERSION_NAME="Obsidian"
             BRANCH_DESC="iOS-Style Compressed Memory Edition"
+            DEFAULT_DEFCONFIG="begonia_user_defconfig"
             ;;
         gaming|onyx|*)
             VERSION_NAME="Onyx"
             BRANCH_DESC="Zero Frame-Drop Gaming Edition"
+            DEFAULT_DEFCONFIG="begonia_user_defconfig"
             ;;
     esac
 else
     BRANCH_DESC="${BRANCH_DESC:-Custom Edition}"
+    DEFAULT_DEFCONFIG="begonia_user_defconfig"
 fi
+DEFCONFIG="${DEFCONFIG:-$DEFAULT_DEFCONFIG}"
 BRANCH_CODENAME="$VERSION_NAME"
 
 # Derive dynamic localversion string: contains name, version, version name, branch, commit id
