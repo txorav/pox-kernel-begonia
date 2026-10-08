@@ -119,6 +119,8 @@ extern u32 get_devinfo_with_index(u32 index);
 extern unsigned int eem_corn_flag;
 extern const unsigned int reg_dump_addr_off[DUMP_LEN];
 
+#include <mt-plat/mtk_ram_console.h>
+
 #ifdef CONFIG_MTK_RAM_CONSOLE
 #define CONFIG_EEM_AEE_RR_REC 1
 #endif
