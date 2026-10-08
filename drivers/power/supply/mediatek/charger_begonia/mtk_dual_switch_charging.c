@@ -29,6 +29,8 @@
 		|| ((left) <= (right) && (left) <= (value) \
 			&& (value) <= (right)))
 
+extern int pox_fast_charge_get(void);
+
 static int _uA_to_mA(int uA)
 {
 	if (uA == -1)
