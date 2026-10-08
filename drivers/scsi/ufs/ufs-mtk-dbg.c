@@ -567,6 +567,9 @@ static int ufs_health_proc_show(struct seq_file *m, void *v)
 	u8 eol = 0, life_a = 0, life_b = 0;
 	int health_pct_min = 0, health_pct_max = 0;
 
+	if (!hba)
+		hba = ufs_primary_hba;
+
 	if (!hba || !hba->dev) {
 		seq_puts(m, "UFS Host Controller not initialized.\n");
 		return 0;
@@ -909,12 +912,17 @@ int ufs_mtk_debug_proc_init(struct ufs_hba *hba)
 	kuid_t uid;
 	kgid_t gid;
 
-	if (!hba || !hba->priv) {
-		pr_info("%s: NULL host, exiting\n", __func__);
+	if (!hba) {
+		pr_info("%s: NULL hba, exiting\n", __func__);
 		return -EINVAL;
 	}
 
-	host = hba->priv;
+	host = ufshcd_get_variant(hba);
+	if (!host) {
+		pr_info("%s: NULL host, exiting\n", __func__);
+		return -EINVAL;
+	}
+	ufs_mtk_hba = hba;
 
 	uid = make_kuid(&init_user_ns, 0);
 	gid = make_kgid(&init_user_ns, 1001);

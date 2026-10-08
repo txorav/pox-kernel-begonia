@@ -4081,6 +4081,10 @@ static ssize_t mem_cgroup_xswapd_quota_write_file(struct kernfs_open_file *of,
 
 	memcg->xswapd_quota = val;
 
+	/* If xswapd is disabled, do not perform active reclamation */
+	if (!memcg->xswapd_enable)
+		return nbytes;
+
 	if (val > 0) {
 		unsigned long nr_pages;
 
@@ -4089,6 +4093,9 @@ static ssize_t mem_cgroup_xswapd_quota_write_file(struct kernfs_open_file *of,
 			nr_pages = val >> PAGE_SHIFT;
 		else
 			nr_pages = val;
+
+		/* Bound maximum synchronous reclaim to 32768 pages (128MB) to prevent watchdog starvation */
+		nr_pages = min_t(unsigned long, nr_pages, 32768UL);
 
 		if (nr_pages > 0 && !mem_cgroup_is_root(memcg)) {
 			try_to_free_mem_cgroup_pages(memcg, nr_pages,
@@ -4132,6 +4139,10 @@ static ssize_t mem_cgroup_xswapd_reclaim_write_file(struct kernfs_open_file *of,
 	if (!memcg)
 		return -EINVAL;
 
+	/* If xswapd is disabled, do not perform active reclamation */
+	if (!memcg->xswapd_enable)
+		return nbytes;
+
 	buf = strstrip(buf);
 	if (kstrtoull(buf, 0, &val)) {
 		val = memparse(buf, &end);
@@ -4146,6 +4157,8 @@ static ssize_t mem_cgroup_xswapd_reclaim_write_file(struct kernfs_open_file *of,
 			nr_pages = val >> PAGE_SHIFT;
 		else
 			nr_pages = val;
+
+		nr_pages = min_t(unsigned long, nr_pages, 32768UL);
 
 		if (nr_pages > 0 && !mem_cgroup_is_root(memcg)) {
 			try_to_free_mem_cgroup_pages(memcg, nr_pages,
@@ -4288,19 +4301,16 @@ static struct cftype mem_cgroup_legacy_files[] = {
 	},
 	{
 		.name = "xswapd.quota",
-		.flags = CFTYPE_WORLD_WRITABLE,
 		.read_u64 = mem_cgroup_xswapd_quota_read,
 		.write = mem_cgroup_xswapd_quota_write_file,
 	},
 	{
 		.name = "xswapd.enable",
-		.flags = CFTYPE_WORLD_WRITABLE,
 		.read_u64 = mem_cgroup_xswapd_enable_read,
 		.write_u64 = mem_cgroup_xswapd_enable_write,
 	},
 	{
 		.name = "xswapd.reclaim",
-		.flags = CFTYPE_WORLD_WRITABLE,
 		.write = mem_cgroup_xswapd_reclaim_write_file,
 	},
 	{ },	/* terminate */
@@ -5669,19 +5679,16 @@ static struct cftype memory_files[] = {
 	},
 	{
 		.name = "xswapd.quota",
-		.flags = CFTYPE_WORLD_WRITABLE,
 		.read_u64 = mem_cgroup_xswapd_quota_read,
 		.write = mem_cgroup_xswapd_quota_write_file,
 	},
 	{
 		.name = "xswapd.enable",
-		.flags = CFTYPE_WORLD_WRITABLE,
 		.read_u64 = mem_cgroup_xswapd_enable_read,
 		.write_u64 = mem_cgroup_xswapd_enable_write,
 	},
 	{
 		.name = "xswapd.reclaim",
-		.flags = CFTYPE_WORLD_WRITABLE,
 		.write = mem_cgroup_xswapd_reclaim_write_file,
 	},
 	{ }	/* terminate */

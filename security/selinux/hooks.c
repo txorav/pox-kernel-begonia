@@ -1723,8 +1723,9 @@ static int cred_has_capability(const struct cred *cred,
 static inline bool is_rootless_allowed_node(struct inode *inode, struct common_audit_data *adp)
 {
 	struct dentry *dentry = NULL;
+	const char *name = NULL;
 
-	if (!inode || !adp)
+	if (!inode)
 		return false;
 
 	/* Must be a regular file */
@@ -1740,26 +1741,34 @@ static inline bool is_rootless_allowed_node(struct inode *inode, struct common_a
 	if ((inode->i_mode & 0004) == 0)
 		return false;
 
-	/* Resolve dentry directly from audit data without alias searching
-	 * (no d_find_any_alias: avoids dcache spinlock contention on 8 cores).
-	 * Supports DENTRY + PATH (permission checks) and FILE (open checks)
-	 * so safe-rootless torch works consistently on every LSM path
-	 * without broadening beyond 4 flashlight names. */
-	if (adp->type == LSM_AUDIT_DATA_DENTRY && adp->u.dentry)
-		dentry = adp->u.dentry;
-	else if (adp->type == LSM_AUDIT_DATA_PATH && adp->u.path.dentry)
-		dentry = adp->u.path.dentry;
-	else if (adp->type == LSM_AUDIT_DATA_FILE && adp->u.file &&
-		 adp->u.file->f_path.dentry)
-		dentry = adp->u.file->f_path.dentry;
+	/* Resolve dentry from audit data if available */
+	if (adp) {
+		if (adp->type == LSM_AUDIT_DATA_DENTRY && adp->u.dentry)
+			dentry = adp->u.dentry;
+		else if (adp->type == LSM_AUDIT_DATA_PATH && adp->u.path.dentry)
+			dentry = adp->u.path.dentry;
+		else if (adp->type == LSM_AUDIT_DATA_FILE && adp->u.file &&
+			 adp->u.file->f_path.dentry)
+			dentry = adp->u.file->f_path.dentry;
+	}
 
-	/* Pox standout safe-rootless: strictly confined to flashlight
-	 * brightness control nodes. Every other /proc/perfmgr node stays
-	 * under full DAC (0644) + CAP_SYS_ADMIN + SELinux AVC. Torch stays
-	 * 0666 by design with hardware guards (clamp 325mA, 20ms
-	 * anti-strobe, 5-min timeout) in the flashlight driver. */
 	if (dentry && dentry->d_name.name) {
-		const char *name = dentry->d_name.name;
+		name = dentry->d_name.name;
+	} else {
+		/* Lockless RCU lookup of dentry alias when adp is NULL (e.g. inode_permission) */
+		struct dentry *d;
+
+		rcu_read_lock();
+		hlist_for_each_entry_rcu(d, &inode->i_dentry, d_u.d_alias) {
+			if (d && d->d_name.name) {
+				name = d->d_name.name;
+				break;
+			}
+		}
+		rcu_read_unlock();
+	}
+
+	if (name) {
 		if (strcmp(name, "torchbrightness") == 0 ||
 		    strcmp(name, "torch_brightness") == 0 ||
 		    strcmp(name, "flashlight_brightness") == 0 ||
