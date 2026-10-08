@@ -208,7 +208,7 @@ static void kpd_keymap_handler(unsigned long data)
 					hw_keycode);
 
 			linux_keycode = kpd_keymap[hw_keycode];
-			if (linux_keycode == 0U)
+			if (linux_keycode == 0U || linux_keycode == KEY_VOLUMEUP || hw_keycode == 0)
 				continue;
 			input_report_key(kpd_input_dev, linux_keycode, pressed);
 			input_sync(kpd_input_dev);
@@ -404,8 +404,9 @@ static int kpd_pdrv_probe(struct platform_device *pdev)
 		for (i = 17; i < KPD_NUM_KEYS; i += 9)
 			kpd_keymap[i] = 0;
 	}
+	kpd_keymap[0] = 0;
 	for (i = 0; i < KPD_NUM_KEYS; i++) {
-		if (kpd_keymap[i] != 0)
+		if (kpd_keymap[i] != 0 && kpd_keymap[i] != KEY_VOLUMEUP && i != 0)
 			__set_bit(kpd_keymap[i], kpd_input_dev->keybit);
 	}
 
