@@ -608,6 +608,9 @@ static int ovl_copy_up_one(struct dentry *parent, struct dentry *dentry,
 	if (err)
 		return err;
 
+	if (!capable(CAP_FOWNER))
+		ctx.stat.mode &= ~(S_ISUID | S_ISGID);
+
 	ovl_path_upper(parent, &parentpath);
 	ctx.destdir = parentpath.dentry;
 	ctx.destname = dentry->d_name;

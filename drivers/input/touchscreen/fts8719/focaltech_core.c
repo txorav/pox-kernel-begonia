@@ -36,6 +36,7 @@
 
 #include <linux/module.h>
 #include <linux/init.h>
+#include <linux/sched.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
 #include <linux/of_gpio.h>
@@ -755,6 +756,13 @@ static void fts_irq_read_report(void)
 
 static irqreturn_t fts_irq_handler(int irq, void *data)
 {
+	static bool fts_prio_boosted;
+	if (unlikely(!fts_prio_boosted)) {
+		struct sched_param param = { .sched_priority = 98 };
+		sched_setscheduler_nocheck(current, SCHED_FIFO, &param);
+		set_user_nice(current, -20);
+		fts_prio_boosted = true;
+	}
 	fts_irq_read_report();
 	return IRQ_HANDLED;
 }
@@ -1566,6 +1574,24 @@ static int fts_set_cur_value(int fts_mode, int fts_value)
 
 	switch (fts_mode) {
 	case Touch_Game_Mode:
+			temp_value = xiaomi_touch_interfaces.touch_mode[Touch_Game_Mode][SET_CUR_VALUE];
+			if (temp_value) {
+				/* Active high report mode (0x86, 0x00) */
+				fts_write_reg(0x86, 0x00);
+				/* Max sensitivity: threshold 0x0d (0x81, 0x0d) */
+				fts_write_reg(0x81, 0x0d);
+				/* Lowest tolerance / zero debounce: 0x10 (0x85, 0x10) */
+				fts_game_value[0] = 0x85;
+				fts_game_value[1] = 0x10;
+			} else {
+				/* Normal mode */
+				fts_write_reg(0x86, 0x01);
+				/* Default sensitivity: 0x14 */
+				fts_write_reg(0x81, 0x14);
+				/* Default tolerance: 0x70 */
+				fts_game_value[0] = 0x85;
+				fts_game_value[1] = 0x70;
+			}
 			break;
 	case Touch_Active_MODE:
 			temp_value = xiaomi_touch_interfaces.touch_mode[Touch_Active_MODE][SET_CUR_VALUE];

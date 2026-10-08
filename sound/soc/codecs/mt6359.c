@@ -17,6 +17,7 @@
 #include <linux/sched.h>
 #include <linux/kobject.h>
 #include <linux/sysfs.h>
+#include <linux/capability.h>
 
 #include <sound/soc.h>
 #include <sound/tlv.h>
@@ -1020,7 +1021,7 @@ static int ul_pga_set(struct snd_kcontrol *kcontrol,
 	unsigned int id = kcontrol->id.device;
 
 	dev_info(priv->dev, "%s(), id %d, index %d\n", __func__, id, index);
-	if (index > ARRAY_SIZE(ul_pga_gain)) {
+	if (index >= ARRAY_SIZE(ul_pga_gain)) {
 		dev_warn(priv->dev, "return -EINVAL\n");
 		return -EINVAL;
 	}
@@ -6933,13 +6934,17 @@ static ssize_t sound_control_hp_gain_store(struct kobject *kobj, struct kobj_att
 					   const char *buf, size_t count)
 {
 	int val = 0;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
 	if (kstrtoint(buf, 10, &val) == 0)
 		pox_headphone_gain_set(val);
 	return count;
 }
 
 static struct kobj_attribute hp_gain_kattr =
-	__ATTR(headphone_gain, 0664, sound_control_hp_gain_show, sound_control_hp_gain_store);
+	__ATTR(headphone_gain, 0644, sound_control_hp_gain_show, sound_control_hp_gain_store);
 
 static int s_mic_gain_boost = 3;
 
@@ -6952,7 +6957,7 @@ EXPORT_SYMBOL(pox_mic_gain_get);
 int pox_mic_gain_set(int gain)
 {
 	if (gain < 0) gain = 0;
-	if (gain > 7) gain = 7;
+	if (gain > 4) gain = 4;
 	s_mic_gain_boost = gain;
 	if (s_mt6359_priv) {
 		s_mt6359_priv->ana_gain[AUDIO_ANALOG_VOLUME_MICAMP1] = gain;
@@ -6981,13 +6986,17 @@ static ssize_t sound_control_mic_gain_store(struct kobject *kobj, struct kobj_at
 					    const char *buf, size_t count)
 {
 	int val = 0;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
 	if (kstrtoint(buf, 10, &val) == 0)
 		pox_mic_gain_set(val);
 	return count;
 }
 
 static struct kobj_attribute mic_gain_kattr =
-	__ATTR(mic_gain, 0664, sound_control_mic_gain_show, sound_control_mic_gain_store);
+	__ATTR(mic_gain, 0644, sound_control_mic_gain_show, sound_control_mic_gain_store);
 
 static int mt6359_codec_probe(struct snd_soc_codec *codec)
 {

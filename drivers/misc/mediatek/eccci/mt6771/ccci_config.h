@@ -15,7 +15,7 @@
 #define __ECCCI_INTERNAL_OPTION__
 
 /* platform info */
-#define MD_GENERATION       (6297)
+#define MD_GENERATION       (6293)
 #define MD_PLATFORM_INFO    "6293"
 #define AP_PLATFORM_INFO    "MT6771"
 #define CCCI_DRIVER_VER     0x20110118

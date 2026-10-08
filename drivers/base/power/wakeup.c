@@ -567,7 +567,7 @@ static bool wakeup_source_not_registered(struct wakeup_source *ws)
  * function executed when the timer expires, whichever comes first.
  */
 
-static int s_wakelock_blocker_enabled = 1;
+static int s_wakelock_blocker_enabled = 0;
 
 int pox_wakelock_blocker_get(void)
 {
@@ -587,15 +587,9 @@ static bool is_blocked_wakelock(const char *name)
 	if (!s_wakelock_blocker_enabled || !name)
 		return false;
 
-	if (strcmp(name, "wlan_wake") == 0 ||
-	    strcmp(name, "wlan_wow_wl") == 0 ||
-	    strcmp(name, "wlan_extscan_wl") == 0 ||
-	    strcmp(name, "wlan_rx_wake") == 0 ||
-	    strcmp(name, "sensor_ind") == 0 ||
-	    strcmp(name, "ccci_fsm") == 0 ||
-	    strcmp(name, "netmgr_wl") == 0 ||
-	    strcmp(name, "pno_wl") == 0 ||
-	    strcmp(name, "wmt_wl") == 0)
+	/* Never block hardware subsystems (modem CCCI, sensor hub SCP, connsys/WMT, Wi-Fi RX) */
+	if (strcmp(name, "pno_wl") == 0 ||
+	    strcmp(name, "wlan_extscan_wl") == 0)
 		return true;
 
 	return false;

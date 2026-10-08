@@ -1803,9 +1803,9 @@ static void mtk_chg_get_tchg(struct charger_manager *info)
  * Smart Battery Guard & Direct Power Bypass Charging Engine
  * ========================================================================= */
 static int g_battery_bypass_mode = 0;      /* 0 = normal charging, 1 = direct bypass power */
-static int g_battery_charge_limit = 80;    /* default 80% charge ceiling (50-100, 100=disabled) */
-static int g_battery_thermal_guard = 1;   /* 1 = auto bypass when hot */
-static int g_battery_temp_limit = 390;     /* 39.0°C thermal guard threshold */
+static int g_battery_charge_limit = 100;   /* default 100% (limit disabled, charges to 100) */
+static int g_battery_thermal_guard = 0;    /* 0 = disabled by default (JEITA handles thermal regulation) */
+static int g_battery_temp_limit = 460;     /* 46.0°C thermal ceiling if thermal guard manually enabled */
 static int g_battery_bypass_reason = 0;   /* 0=none, 1=manual, 2=cap_limit, 3=thermal */
 
 static void charger_check_status(struct charger_manager *info)
@@ -1879,18 +1879,65 @@ static void charger_check_status(struct charger_manager *info)
 		goto stop_charging;
 	}
 
-	/* Smart Battery Guard & Direct Power Bypass Evaluation */
+	/* Smart Battery Guard & Direct Power Bypass Evaluation.
+	 * Pox health-adaptive + anti-spike: all features kept (manual
+	 * bypass, 50..100 cap with 5% hysteresis, thermal guard with 2C
+	 * hysteresis). Overrides only in dangerous regions to stop
+	 * VSYS droop freezes and over-voltage swelling:
+	 * - vbat>4450mV: stop charging (OVP spike guard, 50mV hysteresis)
+	 * - vbat<3300mV or uisoc<20: force charging, ignore bypass
+	 *   (UVLO/brownout guard, prevents call/game reboot freeze)
+	 * - uisoc>30 but vbat<3500mV: weak/aged high-ESR sag -> force
+	 *   gentle charging, no bypass flapping (smooth experience)
+	 * Hysteresis on every override stops power-path oscillation
+	 * that causes current spikes and UI freezes. */
 	{
 		int uisoc = battery_get_uisoc();
+		int vbat = battery_get_bat_voltage(); /* mV */
+		static bool vhigh_hold, vlow_hold, lowsoc_hold, weak_hold;
 
-		if (g_battery_bypass_mode) {
+		if (vbat > 4450)
+			vhigh_hold = true;
+		else if (vbat < 4400)
+			vhigh_hold = false;
+
+		if (vbat < 3300)
+			vlow_hold = true;
+		else if (vbat > 3350)
+			vlow_hold = false;
+
+		if (uisoc < 20)
+			lowsoc_hold = true;
+		else if (uisoc > 22)
+			lowsoc_hold = false;
+
+		if (uisoc > 30 && vbat < 3500)
+			weak_hold = true;
+		else if (vbat > 3600 || uisoc <= 30)
+			weak_hold = false;
+
+		if (vhigh_hold) {
+			charging = false;
+			g_battery_bypass_reason = 3; /* Over-voltage guard */
+			chr_err("[POX_BATT] health guard: VBAT %dmV over-voltage, charging held off\n", vbat);
+		} else if (vlow_hold || lowsoc_hold) {
+			charging = true;
+			g_battery_bypass_reason = 0; /* UVLO guard: keep VSYS supported */
+			if (g_battery_bypass_mode)
+				chr_err("[POX_BATT] health guard: soc %d vbat %dmV low, bypass deferred to avoid brownout freeze\n", uisoc, vbat);
+		} else if (weak_hold) {
+			charging = true;
+			g_battery_bypass_reason = 0; /* Aged/high-ESR sag: gentle charge, no path flapping */
+			if (g_battery_bypass_mode)
+				chr_err("[POX_BATT] health guard: weak sag soc %d vbat %dmV, bypass deferred for smooth power\n", uisoc, vbat);
+		} else if (g_battery_bypass_mode) {
 			charging = false;
 			g_battery_bypass_reason = 1; /* Manual Direct Power Bypass */
 		} else if (g_battery_charge_limit < 100 && uisoc >= g_battery_charge_limit) {
 			charging = false;
 			g_battery_bypass_reason = 2; /* Charge Limit Cap Reached */
-		} else if (g_battery_bypass_reason == 2 && uisoc > (g_battery_charge_limit - 3)) {
-			charging = false; /* Maintain bypass until 3% hysteresis drop */
+		} else if (g_battery_bypass_reason == 2 && uisoc > (g_battery_charge_limit - 5)) {
+			charging = false; /* Maintain bypass until 5% hysteresis drop */
 		} else if (g_battery_thermal_guard && temperature >= g_battery_temp_limit) {
 			charging = false;
 			g_battery_bypass_reason = 3; /* Thermal Guard Active */
@@ -3418,9 +3465,14 @@ static ssize_t charge_limit_store(struct kobject *kobj, struct kobj_attribute *a
 {
 	int val = 0;
 	if (kstrtoint(buf, 10, &val) == 0) {
-		if (val < 50) val = 50;
-		if (val > 100) val = 100;
+		if (val <= 0 || val >= 100)
+			val = 100;
+		else if (val < 50)
+			val = 100; /* Any value < 50 is not an SoC cap (e.g. 0/disabled from HAL), treat as unlimited */
+
 		g_battery_charge_limit = val;
+		if (g_battery_bypass_reason == 2 && (val >= 100 || battery_get_uisoc() < val))
+			g_battery_bypass_reason = 0;
 		if (pinfo)
 			_wake_up_charger(pinfo);
 	}
@@ -3498,9 +3550,14 @@ EXPORT_SYMBOL(pox_battery_limit_get);
 
 void pox_battery_limit_set(int limit)
 {
-	if (limit < 50) limit = 50;
-	if (limit > 100) limit = 100;
+	if (limit <= 0 || limit >= 100)
+		limit = 100;
+	else if (limit < 50)
+		limit = 100; /* Any value < 50 (like 0 from LineageHealth when no limit is active) means 100% full charge */
+
 	g_battery_charge_limit = limit;
+	if (g_battery_bypass_reason == 2 && (limit >= 100 || battery_get_uisoc() < limit))
+		g_battery_bypass_reason = 0;
 	if (pinfo)
 		_wake_up_charger(pinfo);
 }

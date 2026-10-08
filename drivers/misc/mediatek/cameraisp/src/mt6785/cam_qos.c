@@ -22,6 +22,8 @@
 #include <linux/types.h>
 #include "inc/cam_qos.h"
 
+extern int camera_4k60_get(void);
+
 #ifdef CONFIG_MTK_QOS_SUPPORT
 #include <mmdvfs_pmqos.h>
 #include <smi_port.h>
@@ -574,16 +576,8 @@ int ISP_SetPMQOS(
 	case E_CLK_UPDATE:
 		mtk_dfs_set();
 		target_clk = *(u32 *)pvalue;
-		/*
-		 * Pox Zero-Frame-Drop ISP QoS Floor:
-		 * Clamp target clock floor to 560MHz (cam_step0 peak ISP frequency).
-		 * This prevents ISP DFS from down-throttling to 315MHz or 416MHz during
-		 * 4K/60fps video capture or heavy camera pipelines, preventing dropped frames.
-		 */
-		if (target_clk > 0 && target_clk < 560)
-			target_clk = 560;
 		mtk_dfs_update(target_clk);
-		LOG_DBG("DFS Set clock :%d (clamped: %d)\n", *pvalue, target_clk);
+		LOG_DBG("DFS Set clock :%d\n", *pvalue);
 		break;
 	case E_CLK_SUPPORTED:
 		{

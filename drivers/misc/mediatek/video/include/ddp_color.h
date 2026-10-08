@@ -365,6 +365,7 @@ void mtk_color_setbypass(enum DISP_MODULE_ENUM module, bool bypass);
 
 #define COLOR_MODE_STANDARD    0
 #define COLOR_MODE_REFERENCE   1
+#define COLOR_MODE_TRUE_TONE    1
 #define COLOR_MODE_VIVID       2
 #define COLOR_MODE_SLOG3       3
 

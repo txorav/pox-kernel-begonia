@@ -700,7 +700,7 @@ static int ion_history_record(void *data)
 			IONMSG("%s wait event error:%d\n", __func__, ret);
 			continue;
 		}
-		msleep(500);
+		msleep_interruptible(500);
 		atomic_set(&ion_history_event, 0);
 
 		if (fatal_signal_pending(current)) {

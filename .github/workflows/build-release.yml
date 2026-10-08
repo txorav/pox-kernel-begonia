@@ -47,22 +47,25 @@ jobs:
             kerdevdep/clang
             kerdevdep/gcc
             kerdevdep/anykernel
-            kerdevdep/usr
-            kerdevdep/lib
-            kerdevdep/bin
-            kerdevdep/env.sh
-          key: kerdevdep-toolchains-v1
+          key: kerdevdep-toolchains-v2
+          restore-keys: |
+            kerdevdep-toolchains-v2
+            kerdevdep-toolchains-
 
       - name: Build Pox Kernel & Flashable Zip
         id: build_kernel
         run: |
+          bash kerdevdep/setup_kerdevdep.sh
           export GITHUB_REF_NAME="${{ github.ref_name }}"
           ./build.sh all
 
-          COMMIT_SHORT=$(git rev-parse --short HEAD)
-          ZIP_PATH=$(ls build/Pox-*-${COMMIT_SHORT}-*.zip 2>/dev/null | head -n 1 || ls build/Pox-*.zip | grep -v 'latest.zip' | head -n 1)
+          if [[ -L build/latest.zip ]]; then
+            ZIP_PATH="$(readlink -f build/latest.zip)"
+          else
+            ZIP_PATH="$(ls -t build/Pox-*.zip 2>/dev/null | grep -v 'latest\.zip' | head -n 1 || true)"
+          fi
 
-          if [[ ! -f "$ZIP_PATH" ]]; then
+          if [[ -z "$ZIP_PATH" || ! -f "$ZIP_PATH" ]]; then
             echo "::error::Flashable zip not found in build directory"
             exit 1
           fi
@@ -87,6 +90,7 @@ jobs:
               ;;
           esac
 
+          COMMIT_SHORT="$(git rev-parse --short HEAD 2>/dev/null || echo "${{ github.sha }}" | cut -c1-8)"
           TAG_NAME="Pox-0.9-${EDITION}-${BRANCH_NAME}-${COMMIT_SHORT}"
           RELEASE_TITLE="Pox Kernel 0.9 [${EDITION}] - ${BRANCH_NAME} (${COMMIT_SHORT})"
 
@@ -137,6 +141,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "${{ env.TAG_NAME }}" \
+            --target "${{ github.sha }}" \
             --title "${{ env.RELEASE_TITLE }}" \
             --notes-file release_notes.md \
             "${{ env.ZIP_PATH }}" \

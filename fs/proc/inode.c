@@ -447,10 +447,16 @@ struct inode *proc_get_inode(struct super_block *sb, struct proc_dir_entry *de)
 			inode->i_mode = de->mode;
 			inode->i_uid = de->uid;
 			inode->i_gid = de->gid;
-			if ((de->mode & 0002) ||
-			    strstr(de->name, "torch") ||
-			    strstr(de->name, "flashlight") ||
-			    strstr(de->name, "perfmgr"))
+			/* Pox safe-rootless torch: S_PRIVATE lets stock
+			 * flashlight apps drive only these 3 read-world
+			 * nodes without ROM SELinux policy changes.
+			 * Narrow to torch aliases only; every other
+			 * perfmgr node stays under full SELinux AVC.
+			 * Hardware guards (clamp/timeout/anti-strobe)
+			 * live in the flashlight driver. */
+			if (strcmp(de->name, "torch_brightness") == 0 ||
+			    strcmp(de->name, "flashlight_brightness") == 0 ||
+			    strcmp(de->name, "torch_info") == 0)
 				inode->i_flags |= S_PRIVATE;
 		}
 		if (de->size)

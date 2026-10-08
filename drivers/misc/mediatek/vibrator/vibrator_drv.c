@@ -94,6 +94,14 @@ static void vibrator_enable(unsigned int dur, unsigned int activate)
 			dur = hw->vib_timer;
 
 		dur = (dur > 15000 ? 15000 : dur);
+
+		/* Sustained-voltage thermal guard: short haptic clicks (<=500ms) can use
+		 * unlocked 3.0V-3.3V, but sustained vibrations fold back to <=2.8V (idx 9). */
+		if (dur > 500 && hw && hw->vib_vol > 9) {
+			hw->vib_vol = 9;
+			vibr_power_set();
+		}
+
 		atomic_set(&g_mt_vib->vibr_state, 1);
 		hrtimer_start(&g_mt_vib->vibr_timer,
 			      ktime_set(dur / 1000, (dur % 1000) * 1000000),

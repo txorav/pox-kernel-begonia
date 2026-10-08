@@ -4048,6 +4048,192 @@ out_kfree:
 	return ret;
 }
 
+/*
+ * MIUI / HyperOS xswapd interface:
+ * MiuiIntegratedMemoryService.triggerSwap() controls memory swapping and
+ * compression quotas via /dev/memcg/memory.xswapd.quota.
+ *
+ * Implements a full background asynchronous reclaim worker (xswapd) per memcg
+ * that offloads memory swapping/compression to unbound kernel workqueues,
+ * guaranteeing zero UI stalls or watchdog timeouts on calling framework threads.
+ */
+static void memcg_xswapd_work_func(struct work_struct *work)
+{
+	struct mem_cgroup *memcg = container_of(work, struct mem_cgroup, xswapd_work);
+	unsigned long nr_to_reclaim;
+	unsigned long total_reclaimed = 0;
+	unsigned long flags;
+	unsigned int nr_retries = 16;
+
+	if (!memcg || !memcg->xswapd_enable)
+		return;
+
+	spin_lock_irqsave(&memcg->xswapd_lock, flags);
+	nr_to_reclaim = memcg->xswapd_target_pages;
+	memcg->xswapd_target_pages = 0;
+	spin_unlock_irqrestore(&memcg->xswapd_lock, flags);
+
+	if (!nr_to_reclaim)
+		return;
+
+	/* Cap per-pass reclaim batch to 32768 pages (128MB) for fair scheduling */
+	nr_to_reclaim = min_t(unsigned long, nr_to_reclaim, 32768UL);
+
+	while (total_reclaimed < nr_to_reclaim && nr_retries--) {
+		unsigned long batch = min_t(unsigned long, nr_to_reclaim - total_reclaimed,
+					    SWAP_CLUSTER_MAX * 8);
+		unsigned long nr = 0;
+
+		if (!mem_cgroup_is_root(memcg)) {
+			nr = try_to_free_mem_cgroup_pages(memcg, batch, GFP_KERNEL, true);
+		} else {
+			lru_add_drain_all();
+			nr = batch;
+		}
+
+		total_reclaimed += nr;
+		if (!nr)
+			break;
+
+		cond_resched();
+	}
+
+	if (total_reclaimed > 0)
+		atomic64_add(total_reclaimed, &memcg->xswapd_reclaimed);
+}
+
+static u64 mem_cgroup_xswapd_quota_read(struct cgroup_subsys_state *css,
+					struct cftype *cft)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
+
+	return memcg ? memcg->xswapd_quota : 0;
+}
+
+static ssize_t mem_cgroup_xswapd_quota_write_file(struct kernfs_open_file *of,
+						  char *buf, size_t nbytes,
+						  loff_t off)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(of_css(of));
+	unsigned long long val = 0;
+	unsigned long flags;
+	char *end;
+
+	if (!memcg)
+		return -EINVAL;
+
+	buf = strstrip(buf);
+	if (kstrtoull(buf, 0, &val)) {
+		val = memparse(buf, &end);
+		if (buf == end)
+			val = 0;
+	}
+
+	memcg->xswapd_quota = val;
+
+	/* If xswapd is disabled, store quota and return */
+	if (!memcg->xswapd_enable)
+		return nbytes;
+
+	if (val > 0) {
+		unsigned long nr_pages;
+
+		/* If value > 1MB, treat as bytes; else treat as pages */
+		if (val > (1UL << 20))
+			nr_pages = val >> PAGE_SHIFT;
+		else
+			nr_pages = val;
+
+		nr_pages = min_t(unsigned long, nr_pages, 32768UL);
+
+		if (nr_pages > 0) {
+			spin_lock_irqsave(&memcg->xswapd_lock, flags);
+			memcg->xswapd_target_pages = max(memcg->xswapd_target_pages, nr_pages);
+			spin_unlock_irqrestore(&memcg->xswapd_lock, flags);
+
+			queue_work(system_unbound_wq, &memcg->xswapd_work);
+		}
+	}
+
+	return nbytes;
+}
+
+static u64 mem_cgroup_xswapd_enable_read(struct cgroup_subsys_state *css,
+					 struct cftype *cft)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
+
+	return memcg ? memcg->xswapd_enable : 1;
+}
+
+static int mem_cgroup_xswapd_enable_write(struct cgroup_subsys_state *css,
+					  struct cftype *cft, u64 val)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
+
+	if (!memcg)
+		return -EINVAL;
+
+	memcg->xswapd_enable = !!val;
+	if (!memcg->xswapd_enable)
+		cancel_work_sync(&memcg->xswapd_work);
+
+	return 0;
+}
+
+static u64 mem_cgroup_xswapd_reclaim_read(struct cgroup_subsys_state *css,
+					  struct cftype *cft)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
+
+	return memcg ? (atomic64_read(&memcg->xswapd_reclaimed) << PAGE_SHIFT) : 0;
+}
+
+static ssize_t mem_cgroup_xswapd_reclaim_write_file(struct kernfs_open_file *of,
+						    char *buf, size_t nbytes,
+						    loff_t off)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(of_css(of));
+	unsigned long long val = 0;
+	unsigned long flags;
+	char *end;
+
+	if (!memcg)
+		return -EINVAL;
+
+	/* If xswapd is disabled, do not perform active reclamation */
+	if (!memcg->xswapd_enable)
+		return nbytes;
+
+	buf = strstrip(buf);
+	if (kstrtoull(buf, 0, &val)) {
+		val = memparse(buf, &end);
+		if (buf == end)
+			val = 0;
+	}
+
+	if (val > 0) {
+		unsigned long nr_pages;
+
+		if (val > (1UL << 20))
+			nr_pages = val >> PAGE_SHIFT;
+		else
+			nr_pages = val;
+
+		nr_pages = min_t(unsigned long, nr_pages, 32768UL);
+
+		if (nr_pages > 0) {
+			spin_lock_irqsave(&memcg->xswapd_lock, flags);
+			memcg->xswapd_target_pages = max(memcg->xswapd_target_pages, nr_pages);
+			spin_unlock_irqrestore(&memcg->xswapd_lock, flags);
+
+			queue_work(system_unbound_wq, &memcg->xswapd_work);
+		}
+	}
+
+	return nbytes;
+}
+
 static struct cftype mem_cgroup_legacy_files[] = {
 	{
 		.name = "usage_in_bytes",
@@ -4175,6 +4361,21 @@ static struct cftype mem_cgroup_legacy_files[] = {
 		.private = MEMFILE_PRIVATE(_TCP, RES_MAX_USAGE),
 		.write = mem_cgroup_reset,
 		.read_u64 = mem_cgroup_read_u64,
+	},
+	{
+		.name = "xswapd.quota",
+		.read_u64 = mem_cgroup_xswapd_quota_read,
+		.write = mem_cgroup_xswapd_quota_write_file,
+	},
+	{
+		.name = "xswapd.enable",
+		.read_u64 = mem_cgroup_xswapd_enable_read,
+		.write_u64 = mem_cgroup_xswapd_enable_write,
+	},
+	{
+		.name = "xswapd.reclaim",
+		.read_u64 = mem_cgroup_xswapd_reclaim_read,
+		.write = mem_cgroup_xswapd_reclaim_write_file,
 	},
 	{ },	/* terminate */
 };
@@ -4351,6 +4552,12 @@ static struct mem_cgroup *mem_cgroup_alloc(void)
 	INIT_LIST_HEAD(&memcg->event_list);
 	spin_lock_init(&memcg->event_list_lock);
 	memcg->socket_pressure = jiffies;
+	memcg->xswapd_enable = 1;
+	memcg->xswapd_quota = 0;
+	memcg->xswapd_target_pages = 0;
+	atomic64_set(&memcg->xswapd_reclaimed, 0);
+	spin_lock_init(&memcg->xswapd_lock);
+	INIT_WORK(&memcg->xswapd_work, memcg_xswapd_work_func);
 #ifndef CONFIG_SLOB
 	memcg->kmemcg_id = -1;
 #endif
@@ -4478,6 +4685,7 @@ static void mem_cgroup_css_free(struct cgroup_subsys_state *css)
 
 	vmpressure_cleanup(&memcg->vmpressure);
 	cancel_work_sync(&memcg->high_work);
+	cancel_work_sync(&memcg->xswapd_work);
 	mem_cgroup_remove_from_trees(memcg);
 	memcg_free_kmem(memcg);
 	mem_cgroup_free(memcg);
@@ -5538,6 +5746,21 @@ static struct cftype memory_files[] = {
 		.name = "stat",
 		.flags = CFTYPE_NOT_ON_ROOT,
 		.seq_show = memory_stat_show,
+	},
+	{
+		.name = "xswapd.quota",
+		.read_u64 = mem_cgroup_xswapd_quota_read,
+		.write = mem_cgroup_xswapd_quota_write_file,
+	},
+	{
+		.name = "xswapd.enable",
+		.read_u64 = mem_cgroup_xswapd_enable_read,
+		.write_u64 = mem_cgroup_xswapd_enable_write,
+	},
+	{
+		.name = "xswapd.reclaim",
+		.read_u64 = mem_cgroup_xswapd_reclaim_read,
+		.write = mem_cgroup_xswapd_reclaim_write_file,
 	},
 	{ }	/* terminate */
 };

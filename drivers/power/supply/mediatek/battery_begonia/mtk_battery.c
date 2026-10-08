@@ -116,6 +116,11 @@ static int battery_in_data[1] = { 0 };
 static int battery_out_data[1] = { 0 };
 static bool g_ADC_Cali;
 
+extern int pox_battery_limit_get(void);
+extern void pox_battery_limit_set(int limit);
+extern int pox_battery_bypass_get(void);
+extern void pox_battery_bypass_set(int enable);
+
 static enum power_supply_property battery_props[] = {
 	POWER_SUPPLY_PROP_STATUS,
 	POWER_SUPPLY_PROP_HEALTH,
@@ -130,6 +135,7 @@ static enum power_supply_property battery_props[] = {
 	POWER_SUPPLY_PROP_CHARGE_COUNTER,
 	POWER_SUPPLY_PROP_TEMP,
 	POWER_SUPPLY_PROP_INPUT_SUSPEND,
+	POWER_SUPPLY_PROP_CHARGING_ENABLED,
 	POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT,
 	POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT_MAX,
 	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
@@ -540,11 +546,14 @@ static int battery_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_INPUT_SUSPEND:
 		val->intval = charger_manager_is_input_suspend();
 		break;
+	case POWER_SUPPLY_PROP_CHARGING_ENABLED:
+		val->intval = !pox_battery_bypass_get();
+		break;
 	case POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT:
-		val->intval = charger_manager_get_prop_system_temp_level();
+		val->intval = pox_battery_limit_get();
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT_MAX:
-		val->intval = charger_manager_get_prop_system_temp_level_max();
+		val->intval = 100;
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
 		val->intval = 4500000;
@@ -567,8 +576,11 @@ static int battery_set_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_INPUT_SUSPEND:
 		charger_manager_set_input_suspend(val->intval);
 		break;
+	case POWER_SUPPLY_PROP_CHARGING_ENABLED:
+		pox_battery_bypass_set(!val->intval);
+		break;
 	case POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT:
-		charger_manager_set_prop_system_temp_level(val->intval);
+		pox_battery_limit_set(val->intval);
 		break;
 	default:
 		rc = -EINVAL;
@@ -584,6 +596,8 @@ static int battery_prop_is_writeable(struct power_supply *psy,
 {
 	switch (psp) {
 	case POWER_SUPPLY_PROP_INPUT_SUSPEND:
+	case POWER_SUPPLY_PROP_CHARGING_ENABLED:
+	case POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT:
 		return 1;
 	default:
 		break;

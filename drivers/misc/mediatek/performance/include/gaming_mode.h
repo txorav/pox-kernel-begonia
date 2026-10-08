@@ -16,6 +16,7 @@
 
 #define COLOR_MODE_STANDARD  0
 #define COLOR_MODE_REFERENCE 1
+#define COLOR_MODE_TRUE_TONE 1
 #define COLOR_MODE_VIVID     2
 #define COLOR_MODE_SLOG3     3
 
@@ -26,6 +27,8 @@
 
 int gaming_mode_set(int mode);
 int gaming_mode_get(void);
+int pox_true_tone_set(int enable);
+int pox_true_tone_get(void);
 int color_mode_set(int mode);
 int color_mode_get(void);
 int hbm_mode_set(int mode);

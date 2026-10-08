@@ -449,18 +449,74 @@ void get_ufs_aee_buffer(unsigned long *vaddr, unsigned long *size)
 }
 EXPORT_SYMBOL(get_ufs_aee_buffer);
 
+static const char *ufs_get_vendor_name(u16 manf_id)
+{
+	switch (manf_id) {
+	case 0x01CE: return "Samsung Electronics";
+	case 0x01AD: return "SK Hynix";
+	case 0x012C: return "Micron Technology";
+	case 0x0198: return "Kioxia (Toshiba Memory)";
+	case 0x0045: return "Western Digital / SanDisk";
+	case 0x00AA: return "Kingston Technology";
+	case 0x019E: return "YMTC";
+	default:     return "Generic JEDEC UFS";
+	}
+}
+
+static const char *ufs_get_eol_info_str(u8 eol)
+{
+	switch (eol) {
+	case 0x01: return "Normal (< 80% reserved blocks consumed)";
+	case 0x02: return "Warning (80% - 90% reserved blocks consumed)";
+	case 0x03: return "Urgent (>= 90% reserved blocks consumed, critical wear)";
+	default:   return "Not Defined";
+	}
+}
+
+static const char *ufs_get_lifetime_detailed_str(u8 lifetime, char *buf, size_t size)
+{
+	int used_min, used_max;
+	int health_min, health_max;
+
+	if (lifetime == 0x00) {
+		snprintf(buf, size, "Not Defined / Not Supported by chip");
+		return buf;
+	}
+
+	if (lifetime >= 0x01 && lifetime <= 0x0A) {
+		used_min = (lifetime - 1) * 10;
+		used_max = lifetime * 10;
+		health_min = 100 - used_max;
+		health_max = 100 - used_min;
+
+		snprintf(buf, size,
+			 "%d%% - %d%% used [Est. Health Remaining: %d%% - %d%%, avg ~%d%%]",
+			 used_min, used_max, health_min, health_max, (health_min + health_max) / 2);
+		return buf;
+	}
+
+	if (lifetime == 0x0B) {
+		snprintf(buf, size, "Exceeded Maximum Life Time (> 100%% used | Est. Health Remaining: 0%%)");
+		return buf;
+	}
+
+	snprintf(buf, size, "Reserved / Unknown (0x%02X)", lifetime);
+	return buf;
+}
+
 static int ufsdbg_dump_health_desc(struct seq_file *file)
 {
-#ifdef CONFIG_MTK_UFS_DEBUG
 	int err = 0;
 	int buff_len = QUERY_DESC_HEALTH_MAX_SIZE;
 	u8 desc_buf[QUERY_DESC_HEALTH_MAX_SIZE];
 	int i;
 
+	if (!ufs_mtk_hba || !ufs_mtk_hba->dev)
+		return -ENODEV;
+
 	pm_runtime_get_sync(ufs_mtk_hba->dev);
 	err = ufshcd_read_health_desc(ufs_mtk_hba, desc_buf, buff_len);
 	pm_runtime_put_sync(ufs_mtk_hba->dev);
-
 
 	if (err) {
 		seq_printf(file, "Reading Health Descriptor failed. err = %d\n",
@@ -492,10 +548,157 @@ static int ufsdbg_dump_health_desc(struct seq_file *file)
 
 out:
 	return err;
-#else
-	return 0;
-#endif
 }
+
+static int ufs_health_proc_show(struct seq_file *m, void *v)
+{
+	struct ufs_hba *hba = ufs_mtk_hba;
+	u8 desc_buf[QUERY_DESC_HEALTH_MAX_SIZE];
+	int err = 0, i;
+	u16 manf_id = 0;
+	const char *vendor_str = "Unknown Vendor";
+	const char *model_str = "Unknown Model";
+	const char *rev_str = "Unknown Revision";
+	const char *eol_str = "Not Defined";
+	char life_a_buf[96] = "Unknown";
+	char life_b_buf[96] = "Unknown";
+	const char *health_rating = "UNKNOWN";
+	const char *pwr_mode_str = "UNKNOWN";
+	u8 eol = 0, life_a = 0, life_b = 0;
+	int health_pct_min = 0, health_pct_max = 0;
+
+	if (!hba)
+		hba = ufs_primary_hba;
+
+	if (!hba || !hba->dev) {
+		seq_puts(m, "UFS Host Controller not initialized.\n");
+		return 0;
+	}
+
+	if (hba->card) {
+		manf_id = hba->card->wmanufacturerid;
+		model_str = hba->card->model;
+		rev_str = hba->card->prl;
+		vendor_str = ufs_get_vendor_name(manf_id);
+	}
+
+	memset(desc_buf, 0, sizeof(desc_buf));
+	pm_runtime_get_sync(hba->dev);
+	err = ufshcd_read_health_desc(hba, desc_buf, QUERY_DESC_HEALTH_MAX_SIZE);
+	pm_runtime_put_sync(hba->dev);
+
+	if (!err) {
+		eol = desc_buf[2];
+		life_a = desc_buf[3];
+		life_b = desc_buf[4];
+		eol_str = ufs_get_eol_info_str(eol);
+		ufs_get_lifetime_detailed_str(life_a, life_a_buf, sizeof(life_a_buf));
+		ufs_get_lifetime_detailed_str(life_b, life_b_buf, sizeof(life_b_buf));
+
+		if (life_b >= 0x01 && life_b <= 0x0A) {
+			health_pct_min = 100 - (life_b * 10);
+			health_pct_max = 100 - ((life_b - 1) * 10);
+		} else if (life_b == 0x0B) {
+			health_pct_min = 0;
+			health_pct_max = 0;
+		} else {
+			health_pct_min = 100;
+			health_pct_max = 100;
+		}
+
+		if (eol == 0x01 && life_b <= 0x03)
+			health_rating = "HEALTHY (Optimal condition, >= 70% lifespan remaining)";
+		else if (eol == 0x01 && life_b <= 0x07)
+			health_rating = "NORMAL (Moderate wear, 30% - 70% lifespan remaining)";
+		else if (eol == 0x01 && life_b <= 0x09)
+			health_rating = "WARNING (Elevated wear, 10% - 30% lifespan remaining)";
+		else if (eol >= 0x02 || life_b >= 0x0A)
+			health_rating = "CRITICAL (End of Life reached / > 90% worn - backup recommended!)";
+	}
+
+	switch (hba->pwr_info.pwr_rx) {
+	case 1: pwr_mode_str = "FAST"; break;
+	case 2: pwr_mode_str = "SLOW"; break;
+	case 4: pwr_mode_str = "FAST_AUTO"; break;
+	case 5: pwr_mode_str = "SLOW_AUTO"; break;
+	default: pwr_mode_str = "NORMAL"; break;
+	}
+
+	seq_puts(m, "============================================================\n");
+	seq_puts(m, "              UFS DISK & HEALTH INFORMATION                 \n");
+	seq_puts(m, "============================================================\n");
+	seq_printf(m, "Device Model:          %s\n", model_str);
+	seq_printf(m, "Manufacturer:          %s (JEDEC ID: 0x%04X)\n", vendor_str, manf_id);
+	seq_printf(m, "Product Revision:      %s\n", rev_str);
+	seq_puts(m, "Interface Spec:        JEDEC UFS 2.1 (Universal Flash Storage)\n");
+	seq_puts(m, "Controller:            MediaTek MT6785 UFSHCI (11270000.ufshci)\n");
+	seq_puts(m, "\n------------------- FLASH HEALTH & WEAR --------------------\n");
+	if (err) {
+		seq_printf(m, "Health Query Status:   Failed to query UFS descriptor (err = %d)\n", err);
+	} else {
+		seq_printf(m, "Overall Condition:     %s\n", health_rating);
+		seq_printf(m, "Pre-EOL Status:        [0x%02X] %s\n", eol, eol_str);
+		seq_printf(m, "SLC Lifetime (Type A): [0x%02X] %s\n", life_a, life_a_buf);
+		seq_printf(m, "TLC Lifetime (Type B): [0x%02X] %s\n", life_b, life_b_buf);
+		seq_printf(m, "Estimated Chip Health: %d%% - %d%% (Average: ~%d%%)\n",
+			   health_pct_min, health_pct_max, (health_pct_min + health_pct_max) / 2);
+	}
+
+	if (manf_id == 0x01CE && (desc_buf[5] || desc_buf[6] || desc_buf[7] || desc_buf[8] ||
+				  desc_buf[9] || desc_buf[10] || desc_buf[11] || desc_buf[12])) {
+		u32 init_bb = (desc_buf[5] << 24) | (desc_buf[6] << 16) | (desc_buf[7] << 8) | desc_buf[8];
+		u32 run_bb  = (desc_buf[9] << 24) | (desc_buf[10] << 16) | (desc_buf[11] << 8) | desc_buf[12];
+		u32 res_bb  = (desc_buf[13] << 24) | (desc_buf[14] << 16) | (desc_buf[15] << 8) | desc_buf[16];
+		seq_puts(m, "\n---------------- SAMSUNG VENDOR SMART STATS ---------------\n");
+		seq_printf(m, "Factory Bad Blocks:    %u\n", init_bb);
+		seq_printf(m, "Runtime Bad Blocks:    %u\n", run_bb);
+		seq_printf(m, "Reserved Blocks Left:  %u\n", res_bb);
+	}
+
+	seq_puts(m, "\n------------------- CONTROLLER & LINK ----------------------\n");
+	seq_printf(m, "Power Mode:            %s\n", pwr_mode_str);
+	seq_printf(m, "Current Gear:          HS Gear %d (TX), Gear %d (RX)\n",
+		   hba->pwr_info.gear_tx, hba->pwr_info.gear_rx);
+	seq_printf(m, "HS Rate & Lanes:       %s, %d Lane(s) TX / %d Lane(s) RX\n",
+		   hba->pwr_info.hs_rate == 2 ? "HS Series B" : "HS Series A",
+		   hba->pwr_info.lane_tx, hba->pwr_info.lane_rx);
+
+	seq_puts(m, "\n---------------- RAW HEALTH DESCRIPTOR (HEX) ---------------\n");
+	for (i = 0; i < QUERY_DESC_HEALTH_MAX_SIZE; i++) {
+		seq_printf(m, "%02X ", desc_buf[i]);
+		if ((i + 1) % 8 == 0)
+			seq_puts(m, " ");
+		if ((i + 1) % 16 == 0)
+			seq_puts(m, "\n");
+	}
+	seq_puts(m, "\n============================================================\n");
+
+	/* Machine-parseable fields for automated tools and Android HAL */
+	seq_puts(m, "\n# Machine-parseable fields:\n");
+	seq_printf(m, "bPreEOLInfo=0x%02x\n", eol);
+	seq_printf(m, "bDeviceLifeTimeEstA=0x%02x\n", life_a);
+	seq_printf(m, "bDeviceLifeTimeEstB=0x%02x\n", life_b);
+	seq_printf(m, "health_remaining_pct_min=%d\n", health_pct_min);
+	seq_printf(m, "health_remaining_pct_max=%d\n", health_pct_max);
+	seq_printf(m, "health_remaining_pct_avg=%d\n", (health_pct_min + health_pct_max) / 2);
+	seq_printf(m, "model=%s\n", model_str);
+	seq_printf(m, "manufacturer_id=0x%04x\n", manf_id);
+	seq_printf(m, "revision=%s\n", rev_str);
+
+	return 0;
+}
+
+static int ufs_health_proc_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, ufs_health_proc_show, inode->i_private);
+}
+
+static const struct file_operations ufs_health_fops = {
+	.open = ufs_health_proc_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
 
 static char cmd_buf[256];
 
@@ -709,12 +912,17 @@ int ufs_mtk_debug_proc_init(struct ufs_hba *hba)
 	kuid_t uid;
 	kgid_t gid;
 
-	if (!hba || !hba->priv) {
-		pr_info("%s: NULL host, exiting\n", __func__);
+	if (!hba) {
+		pr_info("%s: NULL hba, exiting\n", __func__);
 		return -EINVAL;
 	}
 
-	host = hba->priv;
+	host = ufshcd_get_variant(hba);
+	if (!host) {
+		pr_info("%s: NULL host, exiting\n", __func__);
+		return -EINVAL;
+	}
+	ufs_mtk_hba = hba;
 
 	uid = make_kuid(&init_user_ns, 0);
 	gid = make_kgid(&init_user_ns, 1001);
@@ -739,6 +947,11 @@ int ufs_mtk_debug_proc_init(struct ufs_hba *hba)
 		proc_set_user(prEntry, uid, gid);
 	else
 		pr_info("%s: failed to create /proc/ufs_perf\n", __func__);
+
+	/* Dedicated world-readable UFS health and disk diagnostic interface */
+	prEntry = proc_create("ufs_health", 0444, NULL, &ufs_health_fops);
+	if (!prEntry)
+		pr_info("%s: failed to create /proc/ufs_health\n", __func__);
 
 	return 0;
 }

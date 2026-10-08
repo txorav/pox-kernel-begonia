@@ -18,6 +18,7 @@
 #include <linux/backing-dev.h>
 #include <linux/kobject.h>
 #include <linux/sysfs.h>
+#include <linux/capability.h>
 #include "internal.h"
 
 /* Dynamic Fsync implementation */
@@ -44,12 +45,16 @@ static ssize_t dynamic_fsync_show(struct kobject *kobj, struct kobj_attribute *a
 static ssize_t dynamic_fsync_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
 {
 	int val = 0;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
 	if (kstrtoint(buf, 10, &val) == 0)
 		pox_dynamic_fsync_set(val);
 	return count;
 }
 
-static struct kobj_attribute dynamic_fsync_kattr = __ATTR(dynamic_fsync, 0664, dynamic_fsync_show, dynamic_fsync_store);
+static struct kobj_attribute dynamic_fsync_kattr = __ATTR(dynamic_fsync, 0644, dynamic_fsync_show, dynamic_fsync_store);
 
 static int __init dynamic_fsync_init(void)
 {

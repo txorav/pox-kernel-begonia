@@ -19,6 +19,9 @@
 #include <linux/string.h>
 #include <linux/ctype.h>
 #include <linux/workqueue.h>
+#include <linux/capability.h>
+#include <linux/jiffies.h>
+#include <linux/sched/loadavg.h>
 
 #include "gaming_mode.h"
 
@@ -38,10 +41,29 @@ extern int boost_write_for_perf_idx(int idx, int boost_value);
 extern int prefer_idle_for_perf_idx(int idx, int prefer_idle);
 extern int set_ios_color_mode(int mode);
 extern int get_ios_color_mode(void);
+extern int pox_dynamic_fsync_get(void);
+extern void pox_dynamic_fsync_set(int enable);
 
 static int gaming_mode_state = GAMING_MODE_DISABLED;
 static int user_color_mode_override = -1;
 static int camera_4k60_force = 0;
+/* Power learning counters (read-only via /proc/perfmgr/profile). */
+unsigned long pox_pwr_activations;
+unsigned long pox_pwr_gaming_entries;
+unsigned long pox_pwr_extreme_entries;
+unsigned long pox_pwr_powersave_entries;
+unsigned long pox_pwr_thermal_derates;
+unsigned long pox_pwr_battery_derates;
+EXPORT_SYMBOL(pox_pwr_thermal_derates);
+EXPORT_SYMBOL(pox_pwr_battery_derates);
+/* Dynamic engine: no manual modes. ROM writes are hints; the engine
+ * picks effective power from hint + live battery health, with hold
+ * hysteresis so it never oscillates. Auto on by default. */
+static int pox_pwr_auto = 1;
+static int pox_pwr_hint;
+static bool pox_pwr_derate_hold;
+static struct delayed_work pox_dynamic_work;
+static void pox_dynamic_evaluate(struct work_struct *work);
 static atomic_t pox_cam_active_sessions = ATOMIC_INIT(0);
 static struct delayed_work pox_cam_boost_decay_work;
 static DEFINE_MUTEX(gaming_mode_lock);
@@ -57,6 +79,19 @@ int color_mode_get(void)
 	return get_ios_color_mode();
 }
 EXPORT_SYMBOL(color_mode_get);
+
+int pox_true_tone_set(int enable)
+{
+	user_color_mode_override = enable ? COLOR_MODE_REFERENCE : COLOR_MODE_STANDARD;
+	return set_ios_color_mode(enable ? COLOR_MODE_REFERENCE : COLOR_MODE_STANDARD);
+}
+EXPORT_SYMBOL(pox_true_tone_set);
+
+int pox_true_tone_get(void)
+{
+	return (get_ios_color_mode() == COLOR_MODE_REFERENCE) ? 1 : 0;
+}
+EXPORT_SYMBOL(pox_true_tone_get);
 
 int camera_4k60_set(int force)
 {
@@ -160,6 +195,49 @@ int torch_brightness_get(void)
 }
 EXPORT_SYMBOL(torch_brightness_get);
 
+/* Pox tri-state adaptive memory engine (HarmonyOS / MGLRU / DAMON lesson,
+ * 4.14-safe without backport). Classic LRU only on 4.14, so emulate
+ * generational behavior with per-mode headroom + reclaim bias:
+ * - gaming: early kswapd (WSF 150) fits 8.3ms 120fps budget, swappiness
+ *   100 keeps anon in per-CPU zstd ZRAM (no LMK kills mid-game), pressure
+ *   50 retains dentries for instant launch (EROFS-style caching).
+ * - balanced: WSF 100, pressure 75, same ZRAM speed, throughput dirty 20/10.
+ * - powersave: swappiness 60 (less CPU on compression), WSF 50 (fewer
+ *   kswapd wakeups), pressure 100 (drop caches), dirty 20/10.
+ * page_cluster stays 0 always (ZRAM random; readahead wastes CPU/RAM).
+ * All values are stock-safe ranges; no OOM/corruption path. */
+extern int watermark_scale_factor;
+extern int sysctl_vfs_cache_pressure;
+extern int vm_dirty_ratio;
+extern int dirty_background_ratio;
+extern int vm_swappiness;
+extern int page_cluster;
+static void pox_memory_preset(int mode)
+{
+	if (mode > 0) {
+		vm_swappiness = 100;
+		watermark_scale_factor = 150;
+		sysctl_vfs_cache_pressure = 50;
+		page_cluster = 0;
+		vm_dirty_ratio = 10;
+		dirty_background_ratio = 5;
+	} else if (mode == GAMING_MODE_POWERSAVE) {
+		vm_swappiness = 60;
+		watermark_scale_factor = 50;
+		sysctl_vfs_cache_pressure = 100;
+		page_cluster = 0;
+		vm_dirty_ratio = 20;
+		dirty_background_ratio = 10;
+	} else {
+		vm_swappiness = 100;
+		watermark_scale_factor = 100;
+		sysctl_vfs_cache_pressure = 75;
+		page_cluster = 0;
+		vm_dirty_ratio = 20;
+		dirty_background_ratio = 10;
+	}
+}
+
 int gaming_mode_set(int mode)
 {
 	mutex_lock(&gaming_mode_lock);
@@ -167,6 +245,34 @@ int gaming_mode_set(int mode)
 	if (mode == gaming_mode_state) {
 		mutex_unlock(&gaming_mode_lock);
 		return 0;
+	}
+
+	/* Dynamic engine health adaptation with hold hysteresis.
+	 * Enter derate at >=45C / <15%, release only when <43C and >20%
+	 * so effective power never flaps frame to frame. */
+	{
+		extern int battery_get_bat_temperature(void);
+		extern int battery_get_uisoc(void);
+		int btemp = battery_get_bat_temperature(); /* deciC */
+		int soc = battery_get_uisoc();
+		if (mode >= GAMING_MODE_EXTREME &&
+		    !pox_pwr_derate_hold && (btemp >= 450 || soc < 15)) {
+			pox_pwr_derate_hold = true;
+			if (btemp >= 450) {
+				pox_pwr_thermal_derates++;
+				pr_info("Power learn: batt %d deciC hot, EXTREME->ENABLED (right power, no overheat)\n", btemp);
+			} else {
+				pox_pwr_battery_derates++;
+				pr_info("Power learn: soc %d low, EXTREME->ENABLED (right power, no brownout)\n", soc);
+			}
+			mode = GAMING_MODE_ENABLED;
+		} else if (pox_pwr_derate_hold) {
+			if (btemp < 430 && soc > 20) {
+				pox_pwr_derate_hold = false;
+			} else if (mode >= GAMING_MODE_EXTREME) {
+				mode = GAMING_MODE_ENABLED;
+			}
+		}
 	}
 
 	if (mode > 0) {
@@ -182,7 +288,7 @@ int gaming_mode_set(int mode)
 		/* 2. Schedutil Instantaneous Ramp */
 		schedutil_set_up_rate_limit_us(0, 500);     /* Cluster 0 (A55): 500us ramp */
 		schedutil_set_down_rate_limit_us(0, 20000); /* 20ms hold prevents inter-frame drops */
-		schedutil_set_up_rate_limit_us(6, 500);     /* Cluster 1 (A76): 500us ramp */
+		schedutil_set_up_rate_limit_us(6, 200);     /* Cluster 1 (A76): 200us instant ramp */
 		schedutil_set_down_rate_limit_us(6, 20000); /* 20ms hold */
 
 		/* 3. Mali-G76 MC4 GPU & GED Instant Boost */
@@ -198,9 +304,7 @@ int gaming_mode_set(int mode)
 		boost_write_for_perf_idx(1, 5);    /* Foreground boost = 5% */
 		prefer_idle_for_perf_idx(1, 1);
 
-		/* 6. Display Engine: Engage iOS Vivid Gaming Cinema HDR profile unless overridden */
-		if (user_color_mode_override < 0)
-			set_ios_color_mode(COLOR_MODE_VIVID);
+		/* 6. Display Engine: True Tone remains default display profile; gaming mode does not alter display calibration */
 
 		/* 7. Extreme Mode: Lock DRAM to Max OPP 0 (2133MHz) */
 		if (mode >= GAMING_MODE_EXTREME)
@@ -211,7 +315,7 @@ int gaming_mode_set(int mode)
 			extern int pox_touch_game_mode_set(int enable);
 			extern int pox_touch_sensitivity_set(int val);
 			pox_touch_game_mode_set(1);
-			pox_touch_sensitivity_set(1);
+			pox_touch_sensitivity_set(2);
 		}
 
 		/* 9. EAS Schedutil Headroom Margin: 32% headroom */
@@ -219,6 +323,21 @@ int gaming_mode_set(int mode)
 			extern void set_capacity_margin(unsigned int margin);
 			set_capacity_margin(1350);
 		}
+
+		/* 9b. Dynamic warm trim: 42..45C trims margin/TA one step
+		 * (still gaming, less heat). >=45C handled by derate above. */
+		if (pox_pwr_auto) {
+			extern int battery_get_bat_temperature(void);
+			if (battery_get_bat_temperature() >= 420 &&
+			    battery_get_bat_temperature() < 450) {
+				extern void set_capacity_margin(unsigned int margin);
+				set_capacity_margin(1310);
+				boost_write_for_perf_idx(3, 15);
+			}
+		}
+
+		/* 10. Adaptive memory: early reclaim, ZRAM-first, launch-cache retain */
+		pox_memory_preset(mode);
 
 		pr_info("Gaming Mode activated: Zero frame-drop profile engaged.\n");
 	} else if (mode == GAMING_MODE_POWERSAVE) {
@@ -250,9 +369,7 @@ int gaming_mode_set(int mode)
 		boost_write_for_perf_idx(1, 0);
 		prefer_idle_for_perf_idx(1, 0);
 
-		/* 6. Display Engine: Standard / Calibrated D65 */
-		if (user_color_mode_override < 0)
-			set_ios_color_mode(COLOR_MODE_REFERENCE);
+		/* 6. Display Engine: True Tone remains default display profile */
 
 		/* 7. Release DRAM Boost */
 		fbt_boost_dram(0);
@@ -271,8 +388,19 @@ int gaming_mode_set(int mode)
 			set_capacity_margin(1126);
 		}
 
+		/* Auto-disarm dynamic fsync on powersave to guarantee database durability */
+		if (pox_dynamic_fsync_get())
+			pox_dynamic_fsync_set(0);
+
+		/* 10. Adaptive memory powersave: less compression CPU, drop caches */
+		pox_memory_preset(mode);
+
 		pr_info("Ultra Power Saver Profile engaged: Maximum battery preservation.\n");
 	} else {
+		/* Auto-disarm dynamic fsync on exit from gaming mode */
+		if (pox_dynamic_fsync_get())
+			pox_dynamic_fsync_set(0);
+
 		pr_info("Deactivating Gaming Mode: Restoring Balanced Profile...\n");
 
 		/* 1. Restore FPSGO Defaults */
@@ -301,9 +429,7 @@ int gaming_mode_set(int mode)
 		boost_write_for_perf_idx(1, 0);
 		prefer_idle_for_perf_idx(1, 0);
 
-		/* 6. Display Engine: Restore iOS TrueColor Reference (Calibrated D65) unless overridden */
-		if (user_color_mode_override < 0)
-			set_ios_color_mode(COLOR_MODE_REFERENCE);
+		/* 6. Display Engine: True Tone remains default display profile */
 
 		/* 7. Release DRAM Boost */
 		fbt_boost_dram(0);
@@ -322,14 +448,157 @@ int gaming_mode_set(int mode)
 			set_capacity_margin(1280);
 		}
 
+		/* 10. Restore balanced memory: ZRAM speed + throughput dirty */
+		pox_memory_preset(mode);
+
 		pr_info("Gaming Mode deactivated: Balanced Profile restored.\n");
 	}
 
+	pox_pwr_activations++;
+	if (mode >= GAMING_MODE_EXTREME)
+		pox_pwr_extreme_entries++;
+	else if (mode > 0)
+		pox_pwr_gaming_entries++;
+	else if (mode == GAMING_MODE_POWERSAVE)
+		pox_pwr_powersave_entries++;
 	gaming_mode_state = mode;
 	mutex_unlock(&gaming_mode_lock);
+
+	/* Dynamic engine: always-on 8s loop in auto. Guesses from real
+	 * CPU/GPU/touch/battery, so zero ROM writes are needed. */
+	if (pox_pwr_auto) {
+		cancel_delayed_work(&pox_dynamic_work);
+		schedule_delayed_work(&pox_dynamic_work, msecs_to_jiffies(8000));
+	} else {
+		cancel_delayed_work(&pox_dynamic_work);
+	}
 	return 0;
 }
 EXPORT_SYMBOL(gaming_mode_set);
+
+/* Dynamic engine core: hints in, effective power out. */
+/* Dynamic engine core: guesses from real values, ROM hints are only bias.
+ * Signals: CPU load (avenrun), GPU loading (GED), finger state (ktch),
+ * battery temp/soc. Hysteresis votes stop flapping. */
+static int pox_dyn_game_votes;
+static int pox_dyn_idle_votes;
+static int pox_dyn_extreme_votes;
+static int pox_dyn_save_votes;
+
+static int pox_dynamic_guess(void)
+{
+	extern int battery_get_bat_temperature(void);
+	extern int battery_get_uisoc(void);
+	extern int pox_touch_active_hint(void);
+	extern unsigned int ged_dvfs_get_gpu_loading(void);
+	int cpu = LOAD_INT(avenrun[0]);
+	int gpu = (int)ged_dvfs_get_gpu_loading();
+	int touch = pox_touch_active_hint();
+	int btemp = battery_get_bat_temperature();
+	int soc = battery_get_uisoc();
+	int hint_bias = (pox_pwr_hint > 0) ? 1 : 0;
+	int game_like, extreme_like, idle_like, save_like;
+
+	if (gpu < 0)
+		gpu = 0;
+	else if (gpu > 100)
+		gpu = 100;
+
+	/* Real game footprint: GPU working, or finger + CPU, or a ROM
+	 * hint together with real CPU load (hint alone never boosts). */
+	game_like = (gpu >= 40) || (touch && cpu >= 2) ||
+		    (hint_bias && cpu >= 3);
+	extreme_like = game_like && gpu >= 70 && btemp < 430 && soc > 30;
+	idle_like = !touch && gpu < 10 && cpu < 2;
+	save_like = soc < 12 && idle_like;
+
+	if (game_like) {
+		if (pox_dyn_game_votes < 3)
+			pox_dyn_game_votes++;
+	} else {
+		pox_dyn_game_votes = 0;
+	}
+	if (extreme_like) {
+		if (pox_dyn_extreme_votes < 3)
+			pox_dyn_extreme_votes++;
+	} else {
+		pox_dyn_extreme_votes = 0;
+	}
+	if (idle_like) {
+		if (pox_dyn_idle_votes < 4)
+			pox_dyn_idle_votes++;
+	} else {
+		pox_dyn_idle_votes = 0;
+	}
+	if (save_like) {
+		if (pox_dyn_save_votes < 3)
+			pox_dyn_save_votes++;
+	} else {
+		pox_dyn_save_votes = 0;
+	}
+
+	if (pox_dyn_save_votes >= 3)
+		return GAMING_MODE_POWERSAVE;
+	if (pox_dyn_extreme_votes >= 3)
+		return GAMING_MODE_EXTREME;
+	if (pox_dyn_game_votes >= 2)
+		return GAMING_MODE_ENABLED;
+	if (pox_dyn_idle_votes >= 4 && gaming_mode_state > 0 &&
+	    pox_pwr_hint <= 0)
+		return GAMING_MODE_DISABLED;
+	return gaming_mode_state;
+}
+
+static int pox_dynamic_effective(int hint)
+{
+	int eff;
+
+	if (!pox_pwr_auto)
+		return hint;
+	/* Manual/ROM hints fast-path for snappiness; the guess loop
+	 * self-corrects within seconds if no real load follows. */
+	if (hint > 0 && gaming_mode_state <= 0)
+		return hint;
+	if (hint == GAMING_MODE_POWERSAVE)
+		return hint;
+	eff = pox_dynamic_guess();
+	/* A latched gaming hint biases one step up, never down. */
+	if (hint > 0 && eff <= 0)
+		eff = GAMING_MODE_ENABLED;
+	return eff;
+}
+
+static void pox_dynamic_evaluate(struct work_struct *work)
+{
+	int eff;
+
+	mutex_lock(&gaming_mode_lock);
+	eff = pox_dynamic_effective(pox_pwr_hint);
+	if (eff != gaming_mode_state) {
+		mutex_unlock(&gaming_mode_lock);
+		gaming_mode_set(eff);
+		return;
+	}
+	mutex_unlock(&gaming_mode_lock);
+
+	/* Autonomous: keep guessing forever in auto. 8s cadence is
+	 * inaudible in power (~one work item) and self-corrects any
+	 * fast-path hint within seconds. */
+	if (pox_pwr_auto)
+		schedule_delayed_work(&pox_dynamic_work, msecs_to_jiffies(8000));
+}
+
+/* ROM writes are hints, not latched modes. */
+int pox_gaming_hint(int hint)
+{
+	if (hint < GAMING_MODE_POWERSAVE)
+		hint = GAMING_MODE_POWERSAVE;
+	else if (hint > GAMING_MODE_EXTREME)
+		hint = GAMING_MODE_EXTREME;
+	pox_pwr_hint = hint;
+	return gaming_mode_set(pox_dynamic_effective(hint));
+}
+EXPORT_SYMBOL(pox_gaming_hint);
 
 int gaming_mode_get(void)
 {
@@ -351,6 +620,11 @@ static int gaming_mode_proc_show(struct seq_file *m, void *v)
 	int color_st = get_ios_color_mode();
 
 	seq_printf(m, "gaming_mode: %d\n", state);
+	seq_printf(m, "engine: dynamic-autonomous (%s, hint %d%s, votes g%d/i%d/x%d/s%d)\n",
+		pox_pwr_auto ? "auto" : "manual", pox_pwr_hint,
+		pox_pwr_derate_hold ? ", health-derated" : "",
+		pox_dyn_game_votes, pox_dyn_idle_votes,
+		pox_dyn_extreme_votes, pox_dyn_save_votes);
 	if (state == GAMING_MODE_EXTREME)
 		seq_printf(m, "status: EXTREME GAMING MODE (Locked Max DRAM OPP + Zero Frame Drops)\n");
 	else if (state == GAMING_MODE_ENABLED)
@@ -375,10 +649,8 @@ static int gaming_mode_proc_show(struct seq_file *m, void *v)
 		(state > 0) ? 1350 : (state < 0 ? 1126 : 1280),
 		(state > 0) ? 32 : (state < 0 ? 10 : 25));
 	seq_printf(m, "  - top_app_prefer_idle: %s\n", (state < 0) ? "disabled (pack to Little)" : "enabled");
-	seq_printf(m, "  - color_mode: %d (%s)\n", color_st,
-		(color_st == COLOR_MODE_SLOG3) ? "Sony S-Log3 / Cinema Flat Profile (LUT Grading)" :
-		(color_st == COLOR_MODE_VIVID) ? "iOS Vivid / Gaming Cinema" :
-		(color_st == COLOR_MODE_REFERENCE) ? "iOS TrueColor Reference (Calibrated D65)" : "Standard Neutral");
+	seq_printf(m, "  - true_tone: %s (Calibrated D65 Liquid Retina Reference [DEFAULT])\n",
+		(color_st == COLOR_MODE_REFERENCE) ? "active" : "standby");
 	seq_printf(m, "  - video_clock_floor: active (anti-lag enabled)\n");
 	seq_printf(m, "  - display_ddr_floor: LP4-2100 minimum\n");
 	seq_printf(m, "  - cfs_latency: 4 ms (500 us preemption, unscaled)\n");
@@ -396,6 +668,9 @@ static ssize_t gaming_mode_proc_write(struct file *file, const char __user *ubuf
 	char buf[32];
 	int val = 0;
 	size_t len;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
 	len = min(count, sizeof(buf) - 1);
 	if (copy_from_user(buf, ubuf, len))
@@ -418,12 +693,20 @@ static ssize_t gaming_mode_proc_write(struct file *file, const char __user *ubuf
 	} else if (strcasecmp(buf, "0") == 0 || strcasecmp(buf, "off") == 0 ||
 		   strcasecmp(buf, "disable") == 0 || strcasecmp(buf, "false") == 0) {
 		val = GAMING_MODE_DISABLED;
+	} else if (strcasecmp(buf, "auto") == 0 || strcasecmp(buf, "dynamic") == 0) {
+		pox_pwr_auto = 1;
+		pox_gaming_hint(pox_pwr_hint);
+		return count;
+	} else if (strcasecmp(buf, "manual") == 0) {
+		pox_pwr_auto = 0;
+		cancel_delayed_work(&pox_dynamic_work);
+		return count;
 	} else {
 		if (kstrtoint(buf, 10, &val) < 0)
 			return -EINVAL;
 	}
 
-	gaming_mode_set(val);
+	pox_gaming_hint(val);
 	return count;
 }
 
@@ -449,9 +732,9 @@ static int color_mode_proc_show(struct seq_file *m, void *v)
 	if (mode == COLOR_MODE_SLOG3)
 		seq_printf(m, "status: Sony S-Log3 / Cinema Flat Profile (Logarithmic Dynamic Range for LUT Grading)\n");
 	else if (mode == COLOR_MODE_VIVID)
-		seq_printf(m, "status: iOS Vivid / Gaming Cinema (Enhanced HDR for Games & Movies)\n");
+		seq_printf(m, "status: iOS Vivid / Cinema HDR\n");
 	else if (mode == COLOR_MODE_REFERENCE)
-		seq_printf(m, "status: iOS TrueColor Reference (Calibrated D65 Liquid Retina)\n");
+		seq_printf(m, "status: True Tone / iOS Reference (Calibrated D65 Liquid Retina) [DEFAULT]\n");
 	else
 		seq_printf(m, "status: Standard Neutral\n");
 	return 0;
@@ -463,6 +746,9 @@ static ssize_t color_mode_proc_write(struct file *file, const char __user *ubuf,
 	char buf[16];
 	int val = 0;
 	size_t len;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
 	len = min(count, sizeof(buf) - 1);
 	if (copy_from_user(buf, ubuf, len))
@@ -499,6 +785,53 @@ static const struct file_operations color_mode_proc_fops = {
 	.release = single_release,
 };
 
+static int true_tone_proc_show(struct seq_file *m, void *v)
+{
+	int tt = pox_true_tone_get();
+	seq_printf(m, "true_tone: %d\n", tt);
+	seq_printf(m, "status: %s\n", tt ? "enabled (Calibrated D65 Liquid Retina Reference [DEFAULT])" : "disabled (Standard Neutral)");
+	return 0;
+}
+
+static ssize_t true_tone_proc_write(struct file *file, const char __user *ubuf,
+				    size_t count, loff_t *ppos)
+{
+	char buf[16];
+	int val = 0;
+	size_t len;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	len = min(count, sizeof(buf) - 1);
+	if (copy_from_user(buf, ubuf, len))
+		return -EFAULT;
+	buf[len] = '\0';
+
+	while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r' || isspace(buf[len - 1])))
+		buf[--len] = '\0';
+
+	if (kstrtoint(buf, 10, &val) < 0)
+		return -EINVAL;
+
+	pox_true_tone_set(val ? 1 : 0);
+	return count;
+}
+
+static int true_tone_proc_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, true_tone_proc_show, NULL);
+}
+
+static const struct file_operations true_tone_proc_fops = {
+	.owner   = THIS_MODULE,
+	.open    = true_tone_proc_open,
+	.read    = seq_read,
+	.write   = true_tone_proc_write,
+	.llseek  = seq_lseek,
+	.release = single_release,
+};
+
 static int hbm_mode_proc_show(struct seq_file *m, void *v)
 {
 	int mode = hbm_mode_get();
@@ -522,6 +855,9 @@ static ssize_t hbm_mode_proc_write(struct file *file, const char __user *ubuf,
 	char buf[16];
 	int val = 0;
 	size_t len;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
 	len = min(count, sizeof(buf) - 1);
 	if (copy_from_user(buf, ubuf, len))
@@ -577,9 +913,16 @@ static ssize_t torch_brightness_proc_write(struct file *file, const char __user 
 	char buf[16];
 	int val = 0;
 	size_t len;
-
+	/* Pox standout: intentional safe-rootless torch grading (0666).
+	 * No CAP_SYS_ADMIN so flashlight apps work without root.
+	 * Safety lives in pox_torch_brightness_set(): clamp sel 0..24
+	 * (25..325mA/ch), 5-min auto-timeout, mutex, camera arbitration.
+	 * Here: reject oversize fuzz, clamp 0..255, rate-limit strobing. */
+	static unsigned long last_jiffies;
 	if (count == 0)
 		return 0;
+	if (count >= sizeof(buf))
+		return -EINVAL;
 
 	len = min(count, sizeof(buf) - 1);
 	if (copy_from_user(buf, ubuf, len))
@@ -600,6 +943,20 @@ static ssize_t torch_brightness_proc_write(struct file *file, const char __user 
 		if (kstrtoint(buf, 10, &val) < 0)
 			return -EINVAL;
 	}
+
+	/* Clamp to 0..255 (driver further clamps to sel 0..24). Never
+	 * allow negative wrap or huge values to reach hardware. */
+	if (val < 0)
+		val = 0;
+	else if (val > 255)
+		val = 255;
+
+	/* Anti-strobe: max one level change per 20ms. Prevents rapid
+	 * on/off fuzz from overheating MT6360 or triggering
+	 * photosensitivity, while keeping smooth grading feel. */
+	if (last_jiffies && time_before(jiffies, last_jiffies + msecs_to_jiffies(20)))
+		return -EBUSY;
+	last_jiffies = jiffies;
 
 	torch_brightness_set(val);
 	return count;
@@ -682,9 +1039,9 @@ static int camera_profile_proc_show(struct seq_file *m, void *v)
 
 	seq_printf(m, "capabilities:\n");
 	seq_printf(m, "  - 4k_60fps_recording: enabled (Samsung GW1 16MP@60fps custom3 mode)\n");
-	seq_printf(m, "  - isp_qos_floor: locked 560MHz peak Imagiq clock (zero dropped frames)\n");
-	seq_printf(m, "  - venc_clock_floor: locked peak OPP 0 (anti-collapse)\n");
-	seq_printf(m, "  - memory_qos_floor: LP4X-3733 peak bandwidth\n");
+	seq_printf(m, "  - isp_qos: launch-primed 560MHz, dynamic DFS after (no forced floor)\n");
+	seq_printf(m, "  - venc_clock: active-session floor (anti-collapse)\n");
+	seq_printf(m, "  - memory_qos_floor: LP4-2100 (HRT_LEVEL0 DDR floor)\n");
 	seq_printf(m, "  - zero_shutter_lag: supported (2-frame delay pipeline)\n");
 	seq_printf(m, "  - log_transfer_function: %s\n", (mode == COLOR_MODE_SLOG3) ? "S-Log3 Logarithmic (42% Middle Gray, 61% 90-White)" : "Rec.709 Standard");
 	return 0;
@@ -723,14 +1080,23 @@ static ssize_t camera_4k60_proc_write(struct file *file, const char __user *ubuf
 {
 	char buf[16];
 	int val = 0;
+	size_t len;
 
-	if (count >= sizeof(buf))
-		return -EINVAL;
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
-	if (copy_from_user(buf, ubuf, count))
+	if (count == 0)
+		return 0;
+
+	len = min(count, sizeof(buf) - 1);
+	if (copy_from_user(buf, ubuf, len))
 		return -EFAULT;
 
-	buf[count] = '\0';
+	buf[len] = '\0';
+
+	while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r' || isspace(buf[len - 1])))
+		buf[--len] = '\0';
+
 	if (sscanf(buf, "%d", &val) != 1)
 		return -EINVAL;
 
@@ -765,14 +1131,23 @@ static ssize_t slog3_proc_write(struct file *file, const char __user *ubuf,
 {
 	char buf[16];
 	int val = 0;
+	size_t len;
 
-	if (count >= sizeof(buf))
-		return -EINVAL;
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
-	if (copy_from_user(buf, ubuf, count))
+	if (count == 0)
+		return 0;
+
+	len = min(count, sizeof(buf) - 1);
+	if (copy_from_user(buf, ubuf, len))
 		return -EFAULT;
 
-	buf[count] = '\0';
+	buf[len] = '\0';
+
+	while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r' || isspace(buf[len - 1])))
+		buf[--len] = '\0';
+
 	if (sscanf(buf, "%d", &val) != 1)
 		return -EINVAL;
 
@@ -808,6 +1183,9 @@ static ssize_t gaming_mode_sysfs_store(struct kobject *kobj,
 {
 	int val = 0;
 
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
 	if (sscanf(buf, "%d", &val) != 1)
 		return -EINVAL;
 
@@ -816,12 +1194,12 @@ static ssize_t gaming_mode_sysfs_store(struct kobject *kobj,
 	else if (val > 2)
 		val = 2;
 
-	gaming_mode_set(val);
+	pox_gaming_hint(val);
 	return count;
 }
 
 static struct kobj_attribute gaming_mode_kobj_attr =
-	__ATTR(gaming_mode, 0664, gaming_mode_sysfs_show, gaming_mode_sysfs_store);
+	__ATTR(gaming_mode, 0644, gaming_mode_sysfs_show, gaming_mode_sysfs_store);
 
 static ssize_t color_mode_sysfs_show(struct kobject *kobj,
 				     struct kobj_attribute *attr, char *buf)
@@ -834,6 +1212,9 @@ static ssize_t color_mode_sysfs_store(struct kobject *kobj,
 				      const char *buf, size_t count)
 {
 	int val = 0;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
 	if (sscanf(buf, "%d", &val) != 1)
 		return -EINVAL;
@@ -849,10 +1230,35 @@ static ssize_t color_mode_sysfs_store(struct kobject *kobj,
 }
 
 static struct kobj_attribute color_mode_kobj_attr =
-	__ATTR(color_mode, 0664, color_mode_sysfs_show, color_mode_sysfs_store);
+	__ATTR(color_mode, 0644, color_mode_sysfs_show, color_mode_sysfs_store);
 
 static struct kobj_attribute camera_profile_kobj_attr =
-	__ATTR(camera_profile, 0664, color_mode_sysfs_show, color_mode_sysfs_store);
+	__ATTR(camera_profile, 0644, color_mode_sysfs_show, color_mode_sysfs_store);
+
+static ssize_t true_tone_sysfs_show(struct kobject *kobj,
+				    struct kobj_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%d\n", pox_true_tone_get());
+}
+
+static ssize_t true_tone_sysfs_store(struct kobject *kobj,
+				     struct kobj_attribute *attr,
+				     const char *buf, size_t count)
+{
+	int val = 0;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	if (kstrtoint(buf, 10, &val) != 0)
+		return -EINVAL;
+
+	pox_true_tone_set(val ? 1 : 0);
+	return count;
+}
+
+static struct kobj_attribute true_tone_kobj_attr =
+	__ATTR(true_tone, 0644, true_tone_sysfs_show, true_tone_sysfs_store);
 
 static ssize_t hbm_mode_sysfs_show(struct kobject *kobj,
 				   struct kobj_attribute *attr, char *buf)
@@ -866,6 +1272,9 @@ static ssize_t hbm_mode_sysfs_store(struct kobject *kobj,
 {
 	int val = 0;
 
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
 	if (sscanf(buf, "%d", &val) != 1)
 		return -EINVAL;
 
@@ -874,7 +1283,7 @@ static ssize_t hbm_mode_sysfs_store(struct kobject *kobj,
 }
 
 static struct kobj_attribute hbm_mode_kobj_attr =
-	__ATTR(hbm_mode, 0664, hbm_mode_sysfs_show, hbm_mode_sysfs_store);
+	__ATTR(hbm_mode, 0644, hbm_mode_sysfs_show, hbm_mode_sysfs_store);
 
 static ssize_t torch_brightness_sysfs_show(struct kobject *kobj,
 					   struct kobj_attribute *attr,
@@ -888,19 +1297,37 @@ static ssize_t torch_brightness_sysfs_store(struct kobject *kobj,
 					    const char *buf, size_t count)
 {
 	int val = 0;
+	/* Safe-rootless mirror of proc write: keep 0666 for flashlight
+	 * apps, clamp + 20ms anti-strobe. Hardware ceiling in driver. */
+	static unsigned long last_jiffies_sysfs;
 
 	if (kstrtoint(buf, 10, &val) < 0)
 		return -EINVAL;
+
+	if (val < 0)
+		val = 0;
+	else if (val > 255)
+		val = 255;
+
+	if (last_jiffies_sysfs && time_before(jiffies, last_jiffies_sysfs + msecs_to_jiffies(20)))
+		return -EBUSY;
+	last_jiffies_sysfs = jiffies;
 
 	torch_brightness_set(val);
 	return count;
 }
 
-static struct kobj_attribute torch_brightness_kobj_attr =
-	__ATTR(torch_brightness, 0664, torch_brightness_sysfs_show, torch_brightness_sysfs_store);
+static struct kobj_attribute torch_brightness_kobj_attr = {
+	.attr	= { .name = "torch_brightness", .mode = 0666 },
+	.show	= torch_brightness_sysfs_show,
+	.store	= torch_brightness_sysfs_store,
+};
 
-static struct kobj_attribute flashlight_brightness_kobj_attr =
-	__ATTR(flashlight_brightness, 0664, torch_brightness_sysfs_show, torch_brightness_sysfs_store);
+static struct kobj_attribute flashlight_brightness_kobj_attr = {
+	.attr	= { .name = "flashlight_brightness", .mode = 0666 },
+	.show	= torch_brightness_sysfs_show,
+	.store	= torch_brightness_sysfs_store,
+};
 
 static ssize_t camera_4k60_sysfs_show(struct kobject *kobj,
 				      struct kobj_attribute *attr, char *buf)
@@ -914,6 +1341,9 @@ static ssize_t camera_4k60_sysfs_store(struct kobject *kobj,
 {
 	int val = 0;
 
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
 	if (sscanf(buf, "%d", &val) != 1)
 		return -EINVAL;
 
@@ -922,7 +1352,7 @@ static ssize_t camera_4k60_sysfs_store(struct kobject *kobj,
 }
 
 static struct kobj_attribute camera_4k60_kobj_attr =
-	__ATTR(camera_4k60, 0664, camera_4k60_sysfs_show, camera_4k60_sysfs_store);
+	__ATTR(camera_4k60, 0644, camera_4k60_sysfs_show, camera_4k60_sysfs_store);
 
 static ssize_t slog3_sysfs_show(struct kobject *kobj,
 				struct kobj_attribute *attr, char *buf)
@@ -936,6 +1366,9 @@ static ssize_t slog3_sysfs_store(struct kobject *kobj,
 {
 	int val = 0;
 
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
 	if (sscanf(buf, "%d", &val) != 1)
 		return -EINVAL;
 
@@ -944,7 +1377,7 @@ static ssize_t slog3_sysfs_store(struct kobject *kobj,
 }
 
 static struct kobj_attribute slog3_kobj_attr =
-	__ATTR(slog3, 0664, slog3_sysfs_show, slog3_sysfs_store);
+	__ATTR(slog3, 0644, slog3_sysfs_show, slog3_sysfs_store);
 
 /* Battery Protection Rootless ProcFS Interfaces */
 extern int pox_battery_bypass_get(void);
@@ -969,6 +1402,9 @@ static ssize_t battery_bypass_proc_write(struct file *file, const char __user *b
 {
 	char buf[16];
 	int val;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
 	if (count >= sizeof(buf))
 		return -EINVAL;
@@ -1007,6 +1443,9 @@ static ssize_t battery_limit_proc_write(struct file *file, const char __user *bu
 {
 	char buf[16];
 	int val;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
 	if (count >= sizeof(buf))
 		return -EINVAL;
@@ -1072,6 +1511,9 @@ static ssize_t touch_game_mode_proc_write(struct file *file, const char __user *
 	char buf[16];
 	int val;
 
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
 	if (count >= sizeof(buf))
 		return -EINVAL;
 	if (copy_from_user(buf, buffer, count))
@@ -1109,6 +1551,9 @@ static ssize_t touch_sensitivity_proc_write(struct file *file, const char __user
 {
 	char buf[16];
 	int val;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
 	if (count >= sizeof(buf))
 		return -EINVAL;
@@ -1152,6 +1597,9 @@ static ssize_t headphone_gain_proc_write(struct file *file, const char __user *b
 	char buf[16];
 	int val;
 
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
 	if (count >= sizeof(buf))
 		return -EINVAL;
 	if (copy_from_user(buf, buffer, count))
@@ -1193,6 +1641,9 @@ static ssize_t vibrator_strength_proc_write(struct file *file, const char __user
 {
 	char buf[16];
 	int val;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
 	if (count >= sizeof(buf))
 		return -EINVAL;
@@ -1236,6 +1687,9 @@ static ssize_t wakelock_blocker_proc_write(struct file *file, const char __user 
 	char buf[16];
 	int val;
 
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
 	if (count >= sizeof(buf))
 		return -EINVAL;
 	if (copy_from_user(buf, buffer, count))
@@ -1277,6 +1731,9 @@ static ssize_t fast_charge_proc_write(struct file *file, const char __user *buff
 {
 	char buf[16];
 	int val;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
 	if (count >= sizeof(buf))
 		return -EINVAL;
@@ -1320,6 +1777,9 @@ static ssize_t dt2w_proc_write(struct file *file, const char __user *buffer,
 	char buf[16];
 	int val;
 
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
 	if (count >= sizeof(buf))
 		return -EINVAL;
 	if (copy_from_user(buf, buffer, count))
@@ -1361,6 +1821,9 @@ static ssize_t mic_gain_proc_write(struct file *file, const char __user *buffer,
 {
 	char buf[16];
 	int val;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
 	if (count >= sizeof(buf))
 		return -EINVAL;
@@ -1404,6 +1867,9 @@ static ssize_t dynamic_fsync_proc_write(struct file *file, const char __user *bu
 	char buf[16];
 	int val;
 
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
 	if (count >= sizeof(buf))
 		return -EINVAL;
 	if (copy_from_user(buf, buffer, count))
@@ -1425,6 +1891,74 @@ static const struct file_operations dynamic_fsync_proc_fops = {
 	.release = single_release,
 };
 
+/* Unified Observability Hardware Profile Meta-Node (Section 10) */
+static int profile_proc_show(struct seq_file *m, void *v)
+{
+	char bat_buf[128];
+	int g_mode = gaming_mode_get();
+	int c_mode = get_ios_color_mode();
+	int h_mode = hbm_mode_get();
+	int t_bri = torch_brightness_get();
+	int dt2w = pox_dt2w_get();
+	int dyn_fsync = pox_dynamic_fsync_get();
+	int hp_gain = pox_headphone_gain_get();
+	int mic_gain = pox_mic_gain_get();
+	int vib_str = pox_vibrator_strength_get();
+	int t_game = pox_touch_game_mode_get();
+	int t_sens = pox_touch_sensitivity_get();
+	int cam_4k = camera_4k60_get();
+	int cam_slog = camera_slog3_get();
+	int wl_blk = pox_wakelock_blocker_get();
+	int fast_chg = pox_fast_charge_get();
+
+	pox_battery_status_get(bat_buf, sizeof(bat_buf));
+	strim(bat_buf);
+
+	seq_printf(m, "=== POX KERNEL HARDWARE PROFILE ===\n");
+	seq_printf(m, "gaming_mode: %d (%s)\n", g_mode,
+		   g_mode == 2 ? "EXTREME" : (g_mode == 1 ? "GAMING" : (g_mode == -1 ? "POWERSAVE" : "BALANCED")));
+	seq_printf(m, "true_tone: %d (%s)\n", pox_true_tone_get(),
+		   pox_true_tone_get() ? "ENABLED [DEFAULT]" : "DISABLED");
+	seq_printf(m, "color_mode: %d (%s)\n", c_mode,
+		   c_mode == 3 ? "SLOG3" : (c_mode == 2 ? "VIVID" : (c_mode == 1 ? "REFERENCE_D65" : "STANDARD")));
+	seq_printf(m, "hbm_mode: %d (%s)\n", h_mode,
+		   h_mode == 3 ? "L3_PEAK" : (h_mode == 2 ? "L2_HIGH" : (h_mode == 1 ? "L1_BOOST" : "OFF")));
+	seq_printf(m, "touch_game_mode: %d\n", t_game);
+	seq_printf(m, "touch_sensitivity: %d\n", t_sens);
+	seq_printf(m, "double_tap_to_wake: %d\n", dt2w);
+	seq_printf(m, "battery_status: %s\n", bat_buf);
+	seq_printf(m, "battery_limit: %d%%\n", pox_battery_limit_get());
+	seq_printf(m, "fast_charge: %d\n", fast_chg);
+	seq_printf(m, "headphone_gain: +%ddB\n", hp_gain);
+	seq_printf(m, "mic_gain: %d\n", mic_gain);
+	seq_printf(m, "vibrator_strength: 0x%02X\n", vib_str);
+	seq_printf(m, "torch_brightness: %d\n", t_bri);
+	seq_printf(m, "dynamic_fsync: %d\n", dyn_fsync);
+	seq_printf(m, "camera_4k60: %d\n", cam_4k);
+	seq_printf(m, "camera_slog3: %d\n", cam_slog);
+	seq_printf(m, "wakelock_blocker: %d\n", wl_blk);
+	seq_printf(m, "memory: swappiness=%d wmark_scale=%d vfs_pressure=%d cluster=%d dirty=%d/%d zram=zstd-percpu\n",
+		vm_swappiness, watermark_scale_factor, sysctl_vfs_cache_pressure,
+		page_cluster, vm_dirty_ratio, dirty_background_ratio);
+	seq_printf(m, "power_learn: activations=%lu gaming=%lu extreme=%lu powersave=%lu thermal_derates=%lu battery_derates=%lu\n",
+		pox_pwr_activations, pox_pwr_gaming_entries, pox_pwr_extreme_entries,
+		pox_pwr_powersave_entries, pox_pwr_thermal_derates, pox_pwr_battery_derates);
+	return 0;
+}
+
+static int profile_proc_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, profile_proc_show, NULL);
+}
+
+static const struct file_operations profile_proc_fops = {
+	.owner   = THIS_MODULE,
+	.open    = profile_proc_open,
+	.read    = seq_read,
+	.llseek  = seq_lseek,
+	.release = single_release,
+};
+
 /* ------------------ Init Function ------------------ */
 
 int init_gaming_mode(struct proc_dir_entry *parent)
@@ -1436,34 +1970,42 @@ int init_gaming_mode(struct proc_dir_entry *parent)
 		return -EINVAL;
 
 	INIT_DELAYED_WORK(&pox_cam_boost_decay_work, pox_cam_boost_decay_func);
+	INIT_DELAYED_WORK(&pox_dynamic_work, pox_dynamic_evaluate);
+	pox_pwr_hint = GAMING_MODE_DISABLED;
+	/* Kick autonomous guessing: no ROM write required from here on. */
+	schedule_delayed_work(&pox_dynamic_work, msecs_to_jiffies(8000));
 
-	entry = proc_create("gaming_mode", 0666, parent, &gaming_mode_proc_fops);
+	entry = proc_create("gaming_mode", 0644, parent, &gaming_mode_proc_fops);
 	if (!entry) {
 		pr_err("Failed to create /proc/perfmgr/gaming_mode\n");
 		return -ENOMEM;
 	}
 
-	entry = proc_create("color_mode", 0666, parent, &color_mode_proc_fops);
+	entry = proc_create("color_mode", 0644, parent, &color_mode_proc_fops);
 	if (!entry)
 		pr_warn("Failed to create /proc/perfmgr/color_mode\n");
 
-	entry = proc_create("camera_profile", 0666, parent, &camera_profile_proc_fops);
+	entry = proc_create("true_tone", 0644, parent, &true_tone_proc_fops);
+	if (!entry)
+		pr_warn("Failed to create /proc/perfmgr/true_tone\n");
+
+	entry = proc_create("camera_profile", 0644, parent, &camera_profile_proc_fops);
 	if (!entry)
 		pr_warn("Failed to create /proc/perfmgr/camera_profile\n");
 
-	entry = proc_create("camera_4k60", 0666, parent, &camera_4k60_proc_fops);
+	entry = proc_create("camera_4k60", 0644, parent, &camera_4k60_proc_fops);
 	if (!entry)
 		pr_warn("Failed to create /proc/perfmgr/camera_4k60\n");
 
-	entry = proc_create("slog3", 0666, parent, &slog3_proc_fops);
+	entry = proc_create("slog3", 0644, parent, &slog3_proc_fops);
 	if (!entry)
 		pr_warn("Failed to create /proc/perfmgr/slog3\n");
 
-	entry = proc_create("battery_bypass", 0666, parent, &battery_bypass_proc_fops);
+	entry = proc_create("battery_bypass", 0644, parent, &battery_bypass_proc_fops);
 	if (!entry)
 		pr_warn("Failed to create /proc/perfmgr/battery_bypass\n");
 
-	entry = proc_create("battery_limit", 0666, parent, &battery_limit_proc_fops);
+	entry = proc_create("battery_limit", 0644, parent, &battery_limit_proc_fops);
 	if (!entry)
 		pr_warn("Failed to create /proc/perfmgr/battery_limit\n");
 
@@ -1471,43 +2013,43 @@ int init_gaming_mode(struct proc_dir_entry *parent)
 	if (!entry)
 		pr_warn("Failed to create /proc/perfmgr/battery_status\n");
 
-	entry = proc_create("touch_game_mode", 0666, parent, &touch_game_mode_proc_fops);
+	entry = proc_create("touch_game_mode", 0644, parent, &touch_game_mode_proc_fops);
 	if (!entry)
 		pr_warn("Failed to create /proc/perfmgr/touch_game_mode\n");
 
-	entry = proc_create("touch_sensitivity", 0666, parent, &touch_sensitivity_proc_fops);
+	entry = proc_create("touch_sensitivity", 0644, parent, &touch_sensitivity_proc_fops);
 	if (!entry)
 		pr_warn("Failed to create /proc/perfmgr/touch_sensitivity\n");
 
-	entry = proc_create("headphone_gain", 0666, parent, &headphone_gain_proc_fops);
+	entry = proc_create("headphone_gain", 0644, parent, &headphone_gain_proc_fops);
 	if (!entry)
 		pr_warn("Failed to create /proc/perfmgr/headphone_gain\n");
 
-	entry = proc_create("vibrator_strength", 0666, parent, &vibrator_strength_proc_fops);
+	entry = proc_create("vibrator_strength", 0644, parent, &vibrator_strength_proc_fops);
 	if (!entry)
 		pr_warn("Failed to create /proc/perfmgr/vibrator_strength\n");
 
-	entry = proc_create("wakelock_blocker", 0666, parent, &wakelock_blocker_proc_fops);
+	entry = proc_create("wakelock_blocker", 0644, parent, &wakelock_blocker_proc_fops);
 	if (!entry)
 		pr_warn("Failed to create /proc/perfmgr/wakelock_blocker\n");
 
-	entry = proc_create("fast_charge", 0666, parent, &fast_charge_proc_fops);
+	entry = proc_create("fast_charge", 0644, parent, &fast_charge_proc_fops);
 	if (!entry)
 		pr_warn("Failed to create /proc/perfmgr/fast_charge\n");
 
-	entry = proc_create("dt2w", 0666, parent, &dt2w_proc_fops);
+	entry = proc_create("dt2w", 0644, parent, &dt2w_proc_fops);
 	if (!entry)
 		pr_warn("Failed to create /proc/perfmgr/dt2w\n");
 
-	entry = proc_create("mic_gain", 0666, parent, &mic_gain_proc_fops);
+	entry = proc_create("mic_gain", 0644, parent, &mic_gain_proc_fops);
 	if (!entry)
 		pr_warn("Failed to create /proc/perfmgr/mic_gain\n");
 
-	entry = proc_create("dynamic_fsync", 0666, parent, &dynamic_fsync_proc_fops);
+	entry = proc_create("dynamic_fsync", 0644, parent, &dynamic_fsync_proc_fops);
 	if (!entry)
 		pr_warn("Failed to create /proc/perfmgr/dynamic_fsync\n");
 
-	entry = proc_create("hbm_mode", 0666, parent, &hbm_mode_proc_fops);
+	entry = proc_create("hbm_mode", 0644, parent, &hbm_mode_proc_fops);
 	if (!entry)
 		pr_warn("Failed to create /proc/perfmgr/hbm_mode\n");
 
@@ -1523,6 +2065,10 @@ int init_gaming_mode(struct proc_dir_entry *parent)
 	if (!entry)
 		pr_warn("Failed to create /proc/perfmgr/torch_info\n");
 
+	entry = proc_create("profile", 0444, parent, &profile_proc_fops);
+	if (!entry)
+		pr_warn("Failed to create /proc/perfmgr/profile\n");
+
 	ret = sysfs_create_file(kernel_kobj, &gaming_mode_kobj_attr.attr);
 	if (ret)
 		pr_warn("Failed to create /sys/kernel/gaming_mode (ret=%d)\n", ret);
@@ -1534,6 +2080,12 @@ int init_gaming_mode(struct proc_dir_entry *parent)
 		pr_warn("Failed to create /sys/kernel/color_mode (ret=%d)\n", ret);
 	else
 		pr_info("/sys/kernel/color_mode created successfully\n");
+
+	ret = sysfs_create_file(kernel_kobj, &true_tone_kobj_attr.attr);
+	if (ret)
+		pr_warn("Failed to create /sys/kernel/true_tone (ret=%d)\n", ret);
+	else
+		pr_info("/sys/kernel/true_tone created successfully\n");
 
 	ret = sysfs_create_file(kernel_kobj, &hbm_mode_kobj_attr.attr);
 	if (ret)
@@ -1571,12 +2123,12 @@ int init_gaming_mode(struct proc_dir_entry *parent)
 	else
 		pr_info("/sys/kernel/slog3 created successfully\n");
 
-	/* Initialize to iOS TrueColor Reference (Calibrated D65) */
+	/* Initialize to True Tone Reference (Calibrated D65) as system default */
 	set_ios_color_mode(COLOR_MODE_REFERENCE);
 
 	/* Onyx Gaming Edition: Engage Zero Frame-Drop gaming profile by default */
 	gaming_mode_set(GAMING_MODE_ENABLED);
 
-	pr_info("Gaming Mode & iOS Display Subsystem initialized successfully (Onyx Active).\n");
+	pr_info("Gaming Mode & True Tone Display Subsystem initialized successfully (Onyx Active, True Tone D65 Default).\n");
 	return 0;
 }

@@ -32,6 +32,8 @@ int pox_dt2w_set(int enable)
 }
 EXPORT_SYMBOL(pox_dt2w_set);
 
+#include <linux/capability.h>
+
 static ssize_t dt2w_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
 	return sprintf(buf, "%d\n", pox_dt2w_get());
@@ -40,12 +42,16 @@ static ssize_t dt2w_show(struct kobject *kobj, struct kobj_attribute *attr, char
 static ssize_t dt2w_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
 {
 	int val = 0;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
 	if (kstrtoint(buf, 10, &val) == 0)
 		pox_dt2w_set(val);
 	return count;
 }
 
-static struct kobj_attribute dt2w_kattr = __ATTR(doubletap2wake, 0664, dt2w_show, dt2w_store);
+static struct kobj_attribute dt2w_kattr = __ATTR(doubletap2wake, 0644, dt2w_show, dt2w_store);
 
 static int __init dt2w_init(void)
 {

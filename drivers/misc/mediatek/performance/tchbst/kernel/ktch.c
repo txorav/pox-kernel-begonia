@@ -28,6 +28,8 @@
 #include "boost_ctrl.h"
 #include "mtk_perfmgr_internal.h"
 
+extern int gaming_mode_get(void);
+
 
 
 #define MAX_CORE (8)
@@ -46,6 +48,20 @@ struct boost {
 /*--------------------------------------------*/
 
 static struct boost ktchboost;
+
+/* Pox dynamic engine: real touch-activity signal. Returns 1 while a
+ * finger is down or boost events are pending. Built-in link, no export
+ * needed. Read-only, no behavior change to ktch itself. */
+int pox_touch_active_hint(void)
+{
+	int active;
+	unsigned long flags;
+
+	spin_lock_irqsave(&ktchboost.touch_lock, flags);
+	active = ktchboost.touch_event || (atomic_read(&ktchboost.event) > 0);
+	spin_unlock_irqrestore(&ktchboost.touch_lock, flags);
+	return active;
+}
 
 static int ktch_mgr_enable = 1;
 static int ktch_mgr_core = 1;
@@ -98,7 +114,10 @@ static int ktchboost_thread(void *ptr)
 	int event, core, freq;
 	unsigned long flags;
 
-	set_user_nice(current, -10);
+	struct sched_param param = { .sched_priority = 90 };
+
+	sched_setscheduler_nocheck(current, SCHED_FIFO, &param);
+	set_user_nice(current, -20);
 
 	while (!kthread_should_stop()) {
 
@@ -120,8 +139,8 @@ static int ktchboost_thread(void *ptr)
 			/* Immediate dual-cluster frequency & uclamp boost on finger down / drag */
 			set_freq(1, core, freq);
 		} else {
-			/* Finger lifted: hold boost for 80ms to smooth out tap animations and keyboard response */
-			schedule_timeout_interruptible(msecs_to_jiffies(80));
+			/* Finger lifted: hold boost for 80ms (120ms in gaming mode) to smooth out tap animations and keyboard response */
+			schedule_timeout_interruptible(msecs_to_jiffies(gaming_mode_get() > 0 ? 120 : 80));
 			/* Only drop if no new touch event has queued */
 			if (!atomic_read(&ktchboost.event) && !ktchboost.touch_event)
 				set_freq(0, core, freq);
@@ -309,6 +328,12 @@ static void dbs_input_event(struct input_handle *handle, unsigned int type,
 
 		atomic_inc(&ktchboost.event);
 		wake_up(&ktchboost.wq);
+	} else if (type == EV_ABS && (code == ABS_MT_POSITION_X || code == ABS_MT_POSITION_Y)) {
+		/* Continuous finger motion/aiming: maintain active boost */
+		if (ktchboost.touch_event) {
+			atomic_inc(&ktchboost.event);
+			wake_up(&ktchboost.wq);
+		}
 	}
 }
 

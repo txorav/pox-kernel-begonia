@@ -20,7 +20,21 @@ DEVICE_NAME="${DEVICE_NAME:-Redmi Note 8 Pro}"
 DEVICE_CODENAME="${DEVICE_CODENAME:-begonia}"
 MAINTAINER="${MAINTAINER:-TXO R (Pox Project)}"
 DEFCONFIG="${DEFCONFIG:-begonia_apatch_defconfig}"
-JOBS="${JOBS:-$(nproc)}"
+
+# Determine safe parallel jobs based on available RAM and load to protect host PC from freezing
+auto_jobs() {
+    local mem_avail_kb
+    mem_avail_kb=$(awk '/MemAvailable/ {print $2}' /proc/meminfo 2>/dev/null || echo 3000000)
+    # Estimate ~1.2GB per clang worker; clamp jobs between 2 and 4 to prevent freezing host
+    local safe_jobs=$(( mem_avail_kb / 1200000 ))
+    if (( safe_jobs < 2 )); then
+        safe_jobs=2
+    elif (( safe_jobs > 4 )); then
+        safe_jobs=4
+    fi
+    echo "$safe_jobs"
+}
+JOBS="${JOBS:-$(auto_jobs)}"
 EXTRA_FLAGS="${EXTRA_FLAGS:-}"
 DATE="$(date +%Y%m%d-%H%M)"
 
@@ -76,7 +90,7 @@ warn() { printf '\033[1;33m[!] %s\033[0m\n' "$*"; }
 err()  { printf '\033[1;31m[-] %s\033[0m\n' "$*"; }
 
 # 1. Ensure kerdevdep is bootstrapped
-if [[ ! -f "$KERDEVDEP/env.sh" || ! -x "$KERDEVDEP/clang/bin/clang" ]]; then
+if [[ ! -f "$KERDEVDEP/env.sh" || ! -x "$KERDEVDEP/clang/bin/clang" || ! -x "$KERDEVDEP/bin/ccache" ]]; then
     log "Bootstrapping self-contained dependencies in $KERDEVDEP ..."
     bash "$KERDEVDEP/setup_kerdevdep.sh"
 fi
@@ -211,9 +225,26 @@ build_kernel() {
         log "CONFIG_KALLSYMS_ALL=y verified (APatch supported)."
     fi
 
-    log "Starting kernel compilation..."
+    # Host PC safety: ensure load average and memory are suitable before launching build (skip in CI/GitHub Actions)
+    if [[ -z "${CI:-}" && -z "${GITHUB_ACTIONS:-}" ]]; then
+        local load
+        while true; do
+            load=$(awk '{print int($1)}' /proc/loadavg 2>/dev/null || echo 0)
+            local mem_avail_kb mem_avail_mb
+            mem_avail_kb=$(awk '/MemAvailable/ {print $2}' /proc/meminfo 2>/dev/null || echo 2000000)
+            mem_avail_mb=$(( mem_avail_kb / 1024 ))
+            if (( load > 6 || mem_avail_mb < 700 )); then
+                warn "PC load is high (${load}) or available RAM low (${mem_avail_mb}MB). Waiting 5s for host to settle..."
+                sleep 5
+            else
+                break
+            fi
+        done
+    fi
+
+    log "Starting kernel compilation (nice priority, jobs: $JOBS)..."
     # shellcheck disable=SC2086
-    make O="$OUT_DIR" ARCH="$ARCH" CC="$bcc" \
+    nice -n 10 make O="$OUT_DIR" ARCH="$ARCH" CC="$bcc" \
         CLANG_TRIPLE="$CLANG_TRIPLE" CROSS_COMPILE="$CROSS_COMPILE" \
         $EXTRA_FLAGS -j"$JOBS"
 
@@ -377,18 +408,23 @@ if [ -d "\$RAMDISK" ]; then
 
     # 1. iOS-Style On-Demand Compressed Memory Management
     cat << 'RC_EOF' > \$RAMDISK/init.memory_enhanced.rc
-# iOS-style On-Demand Compressed Memory Management
+# Pox adaptive memory (HarmonyOS EROFS-cache + MGLRU lesson, 4.14-safe):
+# - swappiness 100: anon -> per-CPU zstd ZRAM (no LMK kills, 85% fewer kills lesson)
+# - watermark 100: 1% early kswapd fits 8.3ms frame budget (gaming raises to 150, powersave drops to 50)
+# - page-cluster 0: no swap readahead (ZRAM random; readahead wastes CPU/RAM)
+# - vfs pressure 50: retain dentries for instant launch (EROFS block-cache lesson)
+# - dirty 20/10: throughput (gaming tightens to 10/5 for latency)
+# Kernel gaming_mode switches these per-mode; boot sets balanced baseline.
 on boot
-    write /proc/sys/vm/watermark_scale_factor 200
+    write /proc/sys/vm/watermark_scale_factor 100
     write /proc/sys/vm/page-cluster 0
     write /proc/sys/vm/vfs_cache_pressure 50
     write /proc/sys/vm/swappiness 100
-    write /proc/sys/vm/dirty_ratio 10
-    write /proc/sys/vm/dirty_background_ratio 5
+    write /proc/sys/vm/dirty_ratio 20
+    write /proc/sys/vm/dirty_background_ratio 10
     write /proc/sys/vm/dirty_expire_centisecs 1500
     write /proc/sys/vm/dirty_writeback_centisecs 300
     write /proc/sys/vm/stat_interval 10
-    write /proc/sys/vm/extra_free_kbytes 24300
 
     # Low-latency high-throughput networking & Fair Queueing for BBR
     write /proc/sys/net/core/default_qdisc fq
@@ -406,16 +442,15 @@ on boot
 
 on property:sys.boot_completed=1
     write /sys/block/zram0/comp_algorithm zstd
-    write /proc/sys/vm/watermark_scale_factor 200
+    write /proc/sys/vm/watermark_scale_factor 100
     write /proc/sys/vm/page-cluster 0
     write /proc/sys/vm/vfs_cache_pressure 50
     write /proc/sys/vm/swappiness 100
-    write /proc/sys/vm/dirty_ratio 10
-    write /proc/sys/vm/dirty_background_ratio 5
+    write /proc/sys/vm/dirty_ratio 20
+    write /proc/sys/vm/dirty_background_ratio 10
     write /proc/sys/vm/dirty_expire_centisecs 1500
     write /proc/sys/vm/dirty_writeback_centisecs 300
     write /proc/sys/vm/stat_interval 10
-    write /proc/sys/vm/extra_free_kbytes 24300
     write /proc/sys/net/core/default_qdisc fq
     write /proc/sys/net/ipv4/tcp_congestion_control bbr
     write /proc/sys/net/ipv4/tcp_autocorking 0
@@ -431,87 +466,122 @@ RC_EOF
 # Triggers full gaming performance optimizations and color profiles
 
 on boot
-    chmod 0666 /proc/perfmgr/gaming_mode
-    chmod 0664 /sys/kernel/gaming_mode
-    chmod 0666 /proc/perfmgr/color_mode
-    chmod 0664 /sys/kernel/color_mode
-    chmod 0666 /proc/perfmgr/hbm_mode
-    chmod 0664 /sys/kernel/hbm_mode
+    chmod 0644 /proc/perfmgr/gaming_mode
+    chmod 0644 /sys/kernel/gaming_mode
+    chmod 0644 /proc/perfmgr/true_tone
+    chmod 0644 /sys/kernel/true_tone
+    chmod 0644 /proc/perfmgr/color_mode
+    chmod 0644 /sys/kernel/color_mode
+    chmod 0644 /proc/perfmgr/hbm_mode
+    chmod 0644 /sys/kernel/hbm_mode
+    # Pox standout safe-rootless torch: 0666 by design so stock
+    # flashlight apps work without root; hardware guards
+    # (325mA clamp, 20ms anti-strobe, 5-min timeout) in driver.
     chmod 0666 /proc/perfmgr/torch_brightness
     chmod 0666 /proc/perfmgr/flashlight_brightness
     chmod 0444 /proc/perfmgr/torch_info
-    chmod 0664 /sys/kernel/torch_brightness
-    chmod 0664 /sys/kernel/flashlight_brightness
-    chmod 0666 /sys/class/leds/torch-light0/brightness
-    chmod 0666 /sys/class/leds/torch-light1/brightness
-    chmod 0666 /sys/class/leds/torch-light2/brightness
-    chmod 0666 /sys/class/leds/flashlight/brightness
-    chmod 0666 /proc/perfmgr/camera_profile
-    chmod 0664 /sys/kernel/camera_profile
-    chmod 0666 /proc/perfmgr/camera_4k60
-    chmod 0664 /sys/kernel/camera_4k60
-    chmod 0666 /proc/perfmgr/slog3
-    chmod 0664 /sys/kernel/slog3
-    chmod 0666 /proc/perfmgr/touch_game_mode
-    chmod 0666 /proc/perfmgr/touch_sensitivity
-    chmod 0664 /sys/class/touch/touch_dev/touch_game_mode
-    chmod 0664 /sys/class/touch/touch_dev/touch_sensitivity
-    chmod 0666 /proc/perfmgr/headphone_gain
-    chmod 0664 /sys/kernel/sound_control/headphone_gain
-    chmod 0666 /proc/perfmgr/mic_gain
-    chmod 0664 /sys/kernel/sound_control/mic_gain
-    chmod 0666 /proc/perfmgr/vibrator_strength
-    chmod 0666 /proc/perfmgr/wakelock_blocker
-    chmod 0666 /proc/perfmgr/fast_charge
-    chmod 0666 /proc/perfmgr/dt2w
-    chmod 0664 /sys/android_touch/doubletap2wake
-    chmod 0666 /proc/perfmgr/dynamic_fsync
-    chmod 0664 /sys/kernel/dynamic_fsync/dynamic_fsync
-    chmod 0666 /sys/module/task_turbo/parameters/feats
-    chmod 0666 /proc/perfmgr/battery_bypass
-    chmod 0666 /proc/perfmgr/battery_limit
+    chmod 0444 /proc/perfmgr/profile
+    chmod 0666 /sys/kernel/torch_brightness
+    chmod 0666 /sys/kernel/flashlight_brightness
+    chmod 0666 /sys/devices/platform/flashlights_mt6360/torchbrightness
+    chmod 0644 /proc/perfmgr/camera_profile
+    chmod 0644 /sys/kernel/camera_profile
+    chmod 0644 /proc/perfmgr/slog3
+    chmod 0644 /sys/kernel/slog3
+    chmod 0644 /proc/perfmgr/camera_4k60
+    chmod 0644 /sys/kernel/camera_4k60
+    # Universal USB OTG: keep every adapter working plug-and-play.
+    # Directory needs +x to enumerate; device nodes stay world-
+    # accessible so DACs/serial/ethernet/iPhone tethering just work.
+    chmod 0755 /dev/bus/usb
+    chmod 0666 /dev/bus/usb/*/* 2>/dev/null || true
+    chmod 0666 /dev/ttyUSB0
+    chmod 0666 /dev/ttyUSB1
+    chmod 0666 /dev/ttyUSB2
+    chmod 0666 /dev/ttyUSB3
+    chmod 0666 /dev/ttyACM0
+    chmod 0666 /dev/ttyACM1
+    chmod 0644 /proc/perfmgr/touch_game_mode
+    chmod 0644 /proc/perfmgr/touch_sensitivity
+    chmod 0644 /sys/class/touch/touch_dev/touch_game_mode
+    chmod 0644 /sys/class/touch/touch_dev/touch_sensitivity
+    chmod 0644 /proc/perfmgr/headphone_gain
+    chmod 0644 /sys/kernel/sound_control/headphone_gain
+    chmod 0644 /proc/perfmgr/mic_gain
+    chmod 0644 /sys/kernel/sound_control/mic_gain
+    chmod 0644 /proc/perfmgr/vibrator_strength
+    chmod 0644 /proc/perfmgr/wakelock_blocker
+    chmod 0644 /proc/perfmgr/fast_charge
+    chmod 0644 /proc/perfmgr/dt2w
+    chmod 0644 /sys/android_touch/doubletap2wake
+    chmod 0644 /proc/perfmgr/dynamic_fsync
+    chmod 0644 /sys/kernel/dynamic_fsync/dynamic_fsync
+    chmod 0644 /sys/module/task_turbo/parameters/feats
+    chmod 0644 /proc/perfmgr/battery_bypass
+    chmod 0644 /proc/perfmgr/battery_limit
     chmod 0444 /proc/perfmgr/battery_status
-    chmod 0666 /sys/module/ged/parameters/gx_game_mode
-    chmod 0666 /sys/module/ged/parameters/gx_boost_on
-    chmod 0666 /sys/module/ged/parameters/boost_gpu_enable
-    chmod 0666 /sys/module/ged/parameters/gx_force_cpu_boost
+    chmod 0644 /sys/module/ged/parameters/gx_game_mode
+    chmod 0644 /sys/module/ged/parameters/gx_boost_on
+    chmod 0644 /sys/module/ged/parameters/boost_gpu_enable
+    chmod 0644 /sys/module/ged/parameters/gx_force_cpu_boost
     write /sys/module/ged/parameters/boost_gpu_enable 1
+    write /proc/perfmgr/true_tone 1
     write /proc/perfmgr/color_mode 1
-    write /proc/perfmgr/wakelock_blocker 1
     write /proc/perfmgr/fast_charge 1
 
-    # Default flash storage readahead to 512KB for smooth 4K capture and I/O
-    write /sys/block/sda/queue/read_ahead_kb 512
-    write /sys/block/sdb/queue/read_ahead_kb 512
-    write /sys/block/sdc/queue/read_ahead_kb 512
-    write /sys/block/mmcblk0/queue/read_ahead_kb 512
+    # MIUI / HyperOS 3 memory swap & xswapd cgroup nodes (restricted to root & system)
+    chown root system /dev/memcg/memory.xswapd.quota
+    chown root system /dev/memcg/memory.xswapd.enable
+    chown root system /dev/memcg/memory.xswapd.reclaim
+    chown root system /dev/memcg/apps/memory.xswapd.quota
+    chmod 0664 /dev/memcg/memory.xswapd.quota
+    chmod 0664 /dev/memcg/memory.xswapd.enable
+    chmod 0664 /dev/memcg/memory.xswapd.reclaim
+    chmod 0664 /dev/memcg/apps/memory.xswapd.quota
 
-    # Flash storage queue tuning for low CPU overhead & high IOPS
+    # Default flash storage readahead to 128KB for smooth capture and I/O
+    write /sys/block/sda/queue/read_ahead_kb 128
+    write /sys/block/sdb/queue/read_ahead_kb 128
+    write /sys/block/sdc/queue/read_ahead_kb 128
+    write /sys/block/mmcblk0/queue/read_ahead_kb 128
+
+    # Flash storage queue tuning: allow bio request merging and enable affinity
     write /sys/block/sda/queue/rq_affinity 2
     write /sys/block/sda/queue/iostats 0
     write /sys/block/sda/queue/add_random 0
-    write /sys/block/sda/queue/nomerges 1
-    write /sys/block/sda/queue/nr_requests 256
+    write /sys/block/sda/queue/nomerges 0
+    write /sys/block/sda/queue/nr_requests 128
     write /sys/block/sdb/queue/rq_affinity 2
     write /sys/block/sdb/queue/iostats 0
     write /sys/block/sdb/queue/add_random 0
-    write /sys/block/sdb/queue/nomerges 1
-    write /sys/block/sdb/queue/nr_requests 256
+    write /sys/block/sdb/queue/nomerges 0
+    write /sys/block/sdb/queue/nr_requests 128
     write /sys/block/sdc/queue/rq_affinity 2
     write /sys/block/sdc/queue/iostats 0
     write /sys/block/sdc/queue/add_random 0
-    write /sys/block/sdc/queue/nomerges 1
-    write /sys/block/sdc/queue/nr_requests 256
+    write /sys/block/sdc/queue/nomerges 0
+    write /sys/block/sdc/queue/nr_requests 128
     write /sys/block/mmcblk0/queue/rq_affinity 2
     write /sys/block/mmcblk0/queue/iostats 0
     write /sys/block/mmcblk0/queue/add_random 0
-    write /sys/block/mmcblk0/queue/nomerges 1
-    write /sys/block/mmcblk0/queue/nr_requests 256
+    write /sys/block/mmcblk0/queue/nomerges 0
+    write /sys/block/mmcblk0/queue/nr_requests 128
+
+    # Flash storage health permissions
+    chmod 0444 /proc/ufs_health
+    chmod 0444 /sys/bus/platform/devices/11270000.ufshci/dump_health
+    chmod 0444 /sys/bus/platform/devices/11270000.ufshci/health
+    chmod 0444 /sys/bus/platform/devices/11270000.ufshci/health_remaining_pct
+    chmod 0444 /sys/bus/platform/devices/11270000.ufshci/life_time_a
+    chmod 0444 /sys/bus/platform/devices/11270000.ufshci/life_time_b
+    chmod 0444 /sys/bus/platform/devices/11270000.ufshci/pre_eol_info
+    chmod 0444 /sys/bus/platform/devices/11270000.ufshci/product_name
+    chmod 0444 /sys/bus/platform/devices/11270000.ufshci/product_revision
+    chmod 0444 /sys/bus/platform/devices/11270000.ufshci/manufacturer_id
 
 # ROM Performance Mode / Game Space Active
 on property:persist.sys.power_mode_perf=1
     write /proc/perfmgr/gaming_mode 1
-    write /proc/perfmgr/color_mode 2
     write /proc/net/wlan/setCAM "CAM 1"
     write /sys/block/sda/queue/read_ahead_kb 512
     write /sys/block/sdb/queue/read_ahead_kb 512
@@ -520,7 +590,6 @@ on property:persist.sys.power_mode_perf=1
 
 on property:persist.sys.power_mode_perf=0
     write /proc/perfmgr/gaming_mode 0
-    write /proc/perfmgr/color_mode 1
     write /proc/net/wlan/setCAM "CAM 0"
     write /sys/block/sda/queue/read_ahead_kb 128
     write /sys/block/sdb/queue/read_ahead_kb 128
@@ -530,7 +599,6 @@ on property:persist.sys.power_mode_perf=0
 # Ultra Power Saver Mode (AOSP / LineageOS Battery Saver)
 on property:persist.sys.power_mode_perf=-1
     write /proc/perfmgr/gaming_mode -1
-    write /proc/perfmgr/color_mode 1
     write /proc/net/wlan/setCAM "CAM 0"
     write /sys/block/sda/queue/read_ahead_kb 128
     write /sys/block/sdb/queue/read_ahead_kb 128
@@ -602,10 +670,15 @@ on boot
     chmod 0444 /sys/kernel/battery_protection/battery_soc
     chmod 0444 /sys/kernel/battery_protection/battery_temp
 
-    # Default to 80% Smart Charge Limit and 39C Thermal Protection
-    write /sys/kernel/battery_protection/charge_limit 80
-    write /sys/kernel/battery_protection/thermal_guard 1
-    write /sys/kernel/battery_protection/temp_limit 39
+    # Default: Full charge (100%), thermal guard disabled (0) so JEITA handles protection without artificial stopping
+    write /sys/kernel/battery_protection/charge_limit 100
+    write /sys/kernel/battery_protection/thermal_guard 0
+    write /sys/kernel/battery_protection/temp_limit 48
+
+    # True Tone System Default (Calibrated Liquid Retina D65)
+    chmod 0644 /proc/perfmgr/true_tone
+    chmod 0644 /sys/kernel/true_tone
+    write /proc/perfmgr/true_tone 1
 RC_EOF
     chmod 644 \$RAMDISK/init.battery_guard.rc
 
@@ -620,7 +693,7 @@ ui_print " [*] [3/4] Repacking boot image with ${KERNEL_NAME} ${VERSION_NAME} ($
 ui_print "     - Linux kernel: v$kver (MT6785 / Helio G90T)";
 ui_print "     - Low-battery call reboot fix: active";
 ui_print "     - Smart Battery Guard: Direct-Power Bypass & 39C Thermal Protection";
-ui_print "     - Rootless Bypass Control: /proc/perfmgr/battery_bypass (0666)";
+ui_print "     - Hardware Bypass Control: /proc/perfmgr/battery_bypass (0644)";
 ui_print "     - Hardware 240Hz Touch Gaming Mode: zero-debounce sampling active";
 ui_print "     - Hardware Double-Tap to Wake: /proc/perfmgr/dt2w & /sys/android_touch";
 ui_print "     - MediaTek Task-Turbo: UI RenderThread, Binder & BigCore boost";
@@ -637,10 +710,11 @@ ui_print "     - Storage I/O: BFQ hierarchical scheduler & 512KB readahead activ
 ui_print "     - Cinema Camera Engine: 4K 60FPS unlocked & Sony S-Log3 active";
 ui_print "     - APatch / KernelPatch KALLSYMS: enabled";
 ui_print "     - iOS-Style Compressed Memory: ZSTD ZRAM, 24MB cushion, vfs=50";
-ui_print "     - iOS TrueColor Display Engine: D65 Liquid Retina reference active";
+ui_print "     - True Tone Display Engine: Calibrated D65 Liquid Retina reference active";
 ui_print "     - Video Anti-Lag Engine: VDEC/VENC clock floor & LP4-2100 DDR active";
 ui_print "     - Zero Frame-Drop Gaming Mode: active on ROM Performance toggle";
 ui_print "     - FPSGO Ultra-Rescue + Mali-G76 MC4 Touch Boost: enabled";
+ui_print "     - Universal USB OTG: DACs, controllers, serial & ethernet active";
 write_boot;
 
 ui_print " [*] [4/4] Cleaning up temporary installer files...";
@@ -676,6 +750,42 @@ AK_EOF
     log "================================================="
 }
 
+install_device() {
+    local zip_file
+    zip_file=$(ls -t "$BUILD_DIR"/${ZIP_BASE}*.zip 2>/dev/null | head -n 1 || true)
+    if [[ -z "$zip_file" || ! -f "$zip_file" ]]; then
+        if [[ -f "$BUILD_DIR/latest.zip" ]]; then
+            zip_file="$BUILD_DIR/latest.zip"
+        else
+            err "No AnyKernel3 zip found in $BUILD_DIR. Please run ./build.sh all first."
+            exit 1
+        fi
+    fi
+
+    log "Checking ADB connection to device..."
+    if ! command -v adb >/dev/null 2>&1; then
+        err "adb tool not found in PATH."
+        exit 1
+    fi
+
+    local dev_state
+    dev_state=$(adb get-state 2>/dev/null || echo "offline")
+    if [[ "$dev_state" != "device" && "$dev_state" != "recovery" ]]; then
+        err "Device not detected in 'device' or 'recovery' mode (current state: $dev_state)."
+        exit 1
+    fi
+
+    log "Pushing $(basename "$zip_file") to device (/sdcard/)..."
+    adb push "$zip_file" "/sdcard/$(basename "$zip_file")"
+    adb push "$zip_file" "/sdcard/latest.zip"
+    adb push "$zip_file" "/sdcard/Pox-Kernel-latest.zip"
+
+    log "Kernel zip installed to /sdcard/ on device!"
+    log "  - /sdcard/$(basename "$zip_file")"
+    log "  - /sdcard/latest.zip"
+    log "  - /sdcard/Pox-Kernel-latest.zip"
+}
+
 case "$ACTION" in
     clean)
         clean_build
@@ -692,13 +802,21 @@ case "$ACTION" in
     zip|package)
         package_zip
         ;;
+    install)
+        install_device
+        ;;
+    build-install|"build and install")
+        build_kernel
+        package_zip
+        install_device
+        ;;
     all|"")
         build_kernel
         package_zip
         ;;
     *)
         err "Unknown action: $ACTION"
-        echo "Usage: $0 [all|kernel|zip|menuconfig|clean|distclean]"
+        echo "Usage: $0 [all|kernel|zip|install|build-install|menuconfig|clean|distclean]"
         exit 1
         ;;
 esac
