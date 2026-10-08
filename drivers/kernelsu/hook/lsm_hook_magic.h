@@ -69,11 +69,11 @@ void ksu_unregister_lsm_hook(struct ksu_lsm_hook *hook);
 // --- Global lifecycle for tracked hooks ---
 // Initialize the internal tracking state used by hook/unhook and
 // register/unregister. Safe to call more than once.
-void ksu_lsm_hook_init(void);
+void ksu_lsm_hook_magic_init(void);
 
 // Restore all currently tracked LSM hooks in reverse order and clear the
 // internal registry. Call this from module exit to avoid leaving patched LSM
 // hook slots behind.
-void ksu_lsm_hook_exit(void);
+void ksu_lsm_hook_magic_exit(void);
 
 #endif

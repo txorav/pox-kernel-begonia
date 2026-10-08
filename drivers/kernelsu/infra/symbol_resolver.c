@@ -3,7 +3,9 @@
 #include <linux/string.h>
 #include <linux/version.h>
 
+#include "klog.h" // IWYU pragma: keep
 #include "infra/symbol_resolver.h"
+#include "compat/kernel_compat.h"
 
 // https://github.com/torvalds/linux/commit/89245600941e4e0f87d77f60ee269b5e61ef4e49
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
@@ -175,7 +177,7 @@ void *ksu_resolve_symbol_for_functable_hook(const char *symbol_name)
 void __init ksu_init_symbol_resolver()
 {
 #if !ALWAYS_HAVE_ON_EACH_SYMBOL
-    kallsyms_on_each_symbol_fn = find_kernel_symbol_exact("kallsyms_on_each_symbol");
+    kallsyms_on_each_symbol_fn = (void *)find_kernel_symbol_exact("kallsyms_on_each_symbol");
     if (!kallsyms_on_each_symbol_fn) {
         pr_warn("kallsyms_on_each_symbol not found!\n");
     }

@@ -1,20 +1,39 @@
+#include <linux/version.h>
 #include <linux/capability.h>
 #include <linux/cred.h>
-#include <linux/sched.h>
+#include <linux/err.h>
+#include <linux/fdtable.h>
+#include <linux/file.h>
+#include <linux/fs.h>
+#include <linux/pid.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+// https://github.com/torvalds/linux/commit/8703e8a465b1e9cadc3680b4b1248f5987e54518
 #include <linux/sched/user.h>
-#include <linux/sched/signal.h>
+#include <linux/sched/task.h>
+#endif
+#include <linux/sched.h>
 #include <linux/seccomp.h>
-#include <linux/slab.h>
 #include <linux/thread_info.h>
 #include <linux/uidgid.h>
-#include <linux/version.h>
+#include <linux/syscalls.h>
+#include "objsec.h"
+#include <linux/spinlock.h>
+#include <linux/tty.h>
+#include <linux/security.h>
 
+#include "hook/patch_memory.h"
+#include "infra/symbol_resolver.h"
+#include "linux/kallsyms.h"
 #include "policy/allowlist.h"
 #include "policy/app_profile.h"
+#include "arch.h"
+#include "compat/kernel_compat.h"
 #include "klog.h" // IWYU pragma: keep
 #include "selinux/selinux.h"
 #include "infra/su_mount_ns.h"
+#ifdef CONFIG_KSU_TRACEPOINT_HOOK
 #include "hook/tp_marker.h"
+#endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
 static struct group_info root_groups = { .usage = REFCOUNT_INIT(2) };
@@ -22,7 +41,7 @@ static struct group_info root_groups = { .usage = REFCOUNT_INIT(2) };
 static struct group_info root_groups = { .usage = ATOMIC_INIT(2) };
 #endif
 
-void setup_groups(struct root_profile *profile, struct cred *cred)
+static void setup_groups(struct root_profile *profile, struct cred *cred)
 {
     if (profile->groups_count > KSU_MAX_GROUPS) {
         pr_warn("Failed to setgroups, too large group: %d!\n", profile->uid);
@@ -53,7 +72,11 @@ void setup_groups(struct root_profile *profile, struct cred *cred)
             put_group_info(group_info);
             return;
         }
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 0)
         group_info->gid[i] = kgid;
+#else
+        GROUP_AT(group_info, i) = kgid;
+#endif
     }
 
     groups_sort(group_info);
@@ -61,59 +84,82 @@ void setup_groups(struct root_profile *profile, struct cred *cred)
     put_group_info(group_info);
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
-void seccomp_filter_release(struct task_struct *tsk);
-#else
-void put_seccomp_filter(struct task_struct *tsk);
-#define seccomp_filter_release put_seccomp_filter
+// https://cs.android.com/android/_/android/kernel/common/+/5346453405bf12d7ed6003f45dd47b71744fe1be
+// Some 15-6.6 kernel have this backport while others don't have, e.g. Pixel 10
+// See also:
+// https://github.com/tiann/KernelSU/issues/3629
+#define NEED_BACKPORT_COMPAT                                                                                           \
+    LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
+
+#if NEED_BACKPORT_COMPAT
+static bool has_call_to_spin_lock = false;
 #endif
 
-static void disable_seccomp(void)
+// https://github.com/rsuntk/KernelSU/blob/af9072e19d125a94797ae3c473e7e94c3d8c1bcc/kernel/app_profile.c#L79
+void disable_seccomp(void)
 {
-    struct task_struct *fake;
-
-    fake = kmalloc(sizeof(*fake), GFP_KERNEL);
-    if (!fake) {
-        pr_warn("failed to alloc fake task_struct\n");
+    // https://github.com/backslashxx/KernelSU/tree/e28930645e764b9f0e5d0d1b0d5e236464939075/kernel/app_profile.c
+    if (!current->seccomp.mode) {
         return;
     }
+
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0) || defined(KSU_OPTIONAL_SECCOMP_FILTER_RELEASE))
+    struct task_struct *fake;
+    fake = kmalloc(sizeof(*fake), GFP_ATOMIC);
+    if (!fake) {
+        pr_err("%s: cannot allocate fake struct!\n", __func__);
+        return;
+    }
+#endif
 
     // Refer to kernel/seccomp.c: seccomp_set_mode_strict
     // When disabling Seccomp, ensure that current->sighand->siglock is held during the operation.
     spin_lock_irq(&current->sighand->siglock);
     // disable seccomp
-#if defined(CONFIG_GENERIC_ENTRY) &&                                           \
-    LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+#if defined(CONFIG_GENERIC_ENTRY) && LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
     clear_syscall_work(SECCOMP);
 #else
     clear_thread_flag(TIF_SECCOMP);
 #endif
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0) || defined(KSU_OPTIONAL_SECCOMP_FILTER_RELEASE))
     memcpy(fake, current, sizeof(*fake));
-
+#endif
     current->seccomp.mode = 0;
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0) && !defined(KSU_OPTIONAL_SECCOMP_FILTER_RELEASE))
+    // put_seccomp_filter is allowed while we holding sighand
+    put_seccomp_filter(current);
+#endif
     current->seccomp.filter = NULL;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0) || defined(KSU_OPTIONAL_SECCOMP_FILTER_CNT))
     atomic_set(&current->seccomp.filter_count, 0);
 #endif
     spin_unlock_irq(&current->sighand->siglock);
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0) || defined(KSU_OPTIONAL_SECCOMP_FILTER_RELEASE))
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
     // https://github.com/torvalds/linux/commit/bfafe5efa9754ebc991750da0bcca2a6694f3ed3#diff-45eb79a57536d8eccfc1436932f093eb5c0b60d9361c39edb46581ad313e8987R576-R577
     fake->flags |= PF_EXITING;
+#elif NEED_BACKPORT_COMPAT
+    if (has_call_to_spin_lock) {
+        fake->flags |= PF_EXITING;
+    } else {
+        fake->sighand = NULL;
+    }
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
     // https://github.com/torvalds/linux/commit/0d8315dddd2899f519fe1ca3d4d5cdaf44ea421e#diff-45eb79a57536d8eccfc1436932f093eb5c0b60d9361c39edb46581ad313e8987R556-R558
     fake->sighand = NULL;
 #endif
-
     seccomp_filter_release(fake);
     kfree(fake);
+#endif
 }
 
 int escape_with_root_profile(void)
 {
     int ret = 0;
     struct cred *cred;
+    // a bit useless, but we just want less ifdefs
     struct task_struct *p = current;
     struct task_struct *t;
     struct root_profile *profile = NULL;
@@ -125,7 +171,7 @@ int escape_with_root_profile(void)
         return -ENOMEM;
     }
 
-    if (cred->euid.val == 0) {
+    if (ksu_get_uid_t(current_euid()) == 0) {
         pr_warn("Already root, don't escape!\n");
         goto out_abort_creds;
     }
@@ -135,17 +181,17 @@ int escape_with_root_profile(void)
         goto out_abort_creds;
     }
 
-    profile = ksu_get_root_profile(cred->uid.val);
+    profile = ksu_get_root_profile(ksu_get_uid_t(cred->uid));
 
-    cred->uid.val = profile->uid;
-    cred->suid.val = profile->uid;
-    cred->euid.val = profile->uid;
-    cred->fsuid.val = profile->uid;
+    ksu_get_uid_t(cred->uid) = profile->uid;
+    ksu_get_uid_t(cred->suid) = profile->uid;
+    ksu_get_uid_t(cred->euid) = profile->uid;
+    ksu_get_uid_t(cred->fsuid) = profile->uid;
 
-    cred->gid.val = profile->gid;
-    cred->fsgid.val = profile->gid;
-    cred->sgid.val = profile->gid;
-    cred->egid.val = profile->gid;
+    ksu_get_uid_t(cred->gid) = profile->gid;
+    ksu_get_uid_t(cred->fsgid) = profile->gid;
+    ksu_get_uid_t(cred->sgid) = profile->gid;
+    ksu_get_uid_t(cred->egid) = profile->gid;
     cred->securebits = 0;
 
     BUILD_BUG_ON(sizeof(profile->capabilities.effective) != sizeof(kernel_cap_t));
@@ -161,7 +207,11 @@ int escape_with_root_profile(void)
      * https://github.com/torvalds/linux/blob/v5.14/kernel/sys.c
      * https://github.com/torvalds/linux/blob/v5.14/kernel/cred.c
      */
+#if defined(KSU_HAS_MODERN_ALLOC_UID) || LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0)
     new_user = alloc_uid(cred->uid);
+#else
+    new_user = alloc_uid(current_user_ns(), cred->uid);
+#endif
     if (!new_user) {
         ret = -ENOMEM;
         goto out_abort_creds;
@@ -179,7 +229,11 @@ int escape_with_root_profile(void)
     }
 #endif
 
-    memcpy(&cred->cap_effective, &profile->capabilities.effective, sizeof(cred->cap_effective));
+    // setup capabilities
+    // we need CAP_DAC_READ_SEARCH becuase `/data/adb/ksud` is not accessible for non root process
+    // we add it here but don't add it to cap_inhertiable, it would be dropped automaticly after exec!
+    u64 cap_for_ksud = profile->capabilities.effective | CAP_DAC_READ_SEARCH;
+    memcpy(&cred->cap_effective, &cap_for_ksud, sizeof(cred->cap_effective));
     memcpy(&cred->cap_permitted, &profile->capabilities.effective, sizeof(cred->cap_permitted));
     memcpy(&cred->cap_bset, &profile->capabilities.effective, sizeof(cred->cap_bset));
 
@@ -194,9 +248,11 @@ int escape_with_root_profile(void)
         set_thread_flag(TIF_KSU_DISABLE_ESCAPE_WITH_ROOT);
     }
 
+#ifdef CONFIG_KSU_TRACEPOINT_HOOK
     for_each_thread (p, t) {
         ksu_set_task_tracepoint_flag(t);
     }
+#endif
 
     setup_mount_ns(profile->namespaces);
     ksu_put_root_profile(profile);
@@ -219,4 +275,21 @@ void escape_to_root_for_init(void)
 
     setup_selinux(KERNEL_SU_CONTEXT, cred);
     commit_creds(cred);
+}
+
+void __init ksu_app_profile_init(void)
+{
+#if NEED_BACKPORT_COMPAT
+    unsigned long size = 0;
+    int ret;
+    void *raw_spin_lock_irq_sym = find_kernel_symbol_exact("_raw_spin_lock_irq");
+    void *seccomp_filter_release_sym = find_kernel_symbol_exact("seccomp_filter_release");
+    ret = kallsyms_lookup_size_offset(seccomp_filter_release_sym, &size, NULL);
+    if (!ret || !size) {
+        pr_err("failed to get size of seccomp_filter_release: %d, use 128\n", ret);
+        size = 128;
+    }
+    has_call_to_spin_lock = scan_call_to(seccomp_filter_release_sym, size, raw_spin_lock_irq_sym) != NULL;
+    pr_info("seccomp_filter_release has_call_to_spin_lock = %d\n", has_call_to_spin_lock);
+#endif
 }

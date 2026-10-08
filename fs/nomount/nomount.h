@@ -4,7 +4,8 @@
 #include <linux/types.h>
 #include <linux/idr.h>
 #include <linux/list.h>
-#include <linux/rcupdate.h>
+#include <linux/hashtable.h>
+#include <linux/rbtree.h>
 #include <linux/rwsem.h>
 #include <linux/srcu.h>
 #include <linux/atomic.h>
@@ -12,6 +13,7 @@
 #include <linux/key-type.h>
 #include <linux/highmem.h>
 #include <linux/version.h>
+#include <linux/jump_label.h>
 #include <linux/compat.h>
 
 #define NOMOUNT_VERSION "20"
@@ -31,38 +33,23 @@
 #define nm_warn(fmt, ...) printk(KERN_WARNING "NoMount: [WARN] " fmt, ##__VA_ARGS__)
 #define nm_err(fmt, ...)  printk(KERN_ERR "NoMount: [ERROR] " fmt, ##__VA_ARGS__)
 
-static void *nomount_art_root = NULL;
-static struct nm_uid_array __rcu *nomount_uids = NULL;
-static LIST_HEAD(nomount_rules_list);
+static struct rb_root_cached nomount_rules_tree = RB_ROOT_CACHED;
 static LIST_HEAD(nomount_sb_list);
+static DEFINE_IDR(nomount_uid_idr);
 static DECLARE_RWSEM(nomount_rwsem);
 DEFINE_STATIC_SRCU(nomount_srcu);
 
-/* * Helpers to dynamically calculate the memory address of the strings / structs */
+/* * Helpers to dynamically calculate the memory address of the strings */
 #define nm_get_vpath(rule) ((rule)->paths)
 #define nm_get_rpath(rule) ((rule)->paths + (rule)->v_len + 1)
-#define nm_get_child_name(rule) (nm_get_vpath(rule) + (rule)->v_len - (rule)->child_len)
-#define nm_get_child_rules(array) ((struct nomount_rule **)((array)->hashes + (array)->capacity))
-#define nm_children_is_single(children) ((unsigned long)(children) & 1UL)
-#define nm_children_single_rule(children) ((struct nomount_rule *)((unsigned long)(children) & ~1UL))
-#define nm_children_from_single(rule) ((void *)((unsigned long)(rule) | 1UL))
-#define nm_dir_tag(dir_node) READ_ONCE((dir_node)->_tag_ptr)
-#define nm_dir_is_virtual(dir_node) (nm_dir_tag((dir_node)) & 1UL)
-#define nm_dir_set_owner(dir_node, owner) WRITE_ONCE((dir_node)->_tag_ptr, (unsigned long)(owner) | 1UL)
-#define nm_dir_owner(dir_node) ({ \
-    unsigned long _tag = nm_dir_tag(dir_node); \
-    (_tag & 1UL) ? (struct nomount_rule *)(_tag & ~1UL) : NULL; \
-})
 
 struct nm_iop {
     struct inode_operations fake_iop; /* MUST be exactly at offset 0 */
     const struct inode_operations *orig_iop;
+    struct dentry_operations fake_dop;
+    const struct dentry_operations *orig_dop;
     struct nomount_dir_node *dir_node;
     struct rcu_head rcu;
-
-    /* Dentry Operations Hijacking */
-    struct dentry_operations fake_dops;
-    const struct dentry_operations *orig_dops;
 };
 
 struct nm_fop {
@@ -85,59 +72,63 @@ struct nm_sop {
 struct nm_inode_info {
     struct path r_path;
     struct nomount_dir_node *dir_node;
+    unsigned long v_ino;
     u8 flags;
+};
+
+struct nomount_child_node {
+    struct rcu_head rcu;
+    u32 name_hash;
+    u32 fake_ino;
+    int id;
+    u8 d_type;
+    u8 flags;
+    u16 name_len;
+    struct nomount_rule *rule;
+    char name[]; 
 };
 
 struct nomount_child_array {
     struct rcu_head rcu;
     int count;
     int capacity;
-    u32 hashes[];
+    u32 *hashes;
+    struct nomount_child_node **nodes;
 };
 
 struct nomount_dir_node {
     struct rcu_head rcu;
-    void __rcu *children;
+    struct nomount_child_array __rcu *children;
     u64 bloom_mask;
     struct inode *v_inode;
     union {
+        struct inode *dir_inode;
+        struct nomount_rule *owner_rule;
         unsigned long _tag_ptr;
-        struct {
-            struct nm_iop __rcu *iop;
-            struct nm_fop __rcu *fop;
-        };
     };
     seqcount_t seq;
 };
 
 struct nomount_rule {
-    struct path r_path;
-    struct nomount_dir_node *this_dir;
-    unsigned long v_ino;
+    struct rb_node rb_node;
     u32 v_hash;
     unsigned int target_uid;
     u16 v_len;
-    u16 r_len;
-    u16 child_len;
-    u16 flags;
+    u8  flags;
 
+    struct hlist_node vpath_node;
     struct nomount_dir_node *parent_dir;
-    struct list_head list_node;
-    struct nomount_rule *next_uid;
-    char paths[];
+    struct nomount_dir_node *this_dir;
+    struct path r_path;
+    unsigned long v_ino;
+    char paths[]; 
 };
 
 struct nm_rule_info {
-    u16 flags;
+    u32 flags;
     unsigned long v_ino;
     struct path r_path;
     struct nomount_dir_node *this_dir;
-};
-
-struct nm_uid_array {
-    struct rcu_head rcu;
-    int count;
-    uid_t uids[];
 };
 
 /*** Operaction Vectors ***/
@@ -152,8 +143,7 @@ static const struct inode_operations nm_dir_iops;
 /*** forward declarations ***/
 static struct dentry *nomount_hijacked_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags);
 static int nomount_hijacked_iterate_dir(struct file *file, struct dir_context *ctx);
-static void nomount_hijacked_destroy_inode(struct inode *inode);
-static void nomount_hijack_dentry_ops(struct inode *dir, struct dentry *dentry, bool injected);
+static void nomount_hijack_dentry_ops(struct dentry *dentry);
 static void nm_free_rule(struct nomount_rule *rule);
 
 /* =====================================================================
@@ -184,396 +174,54 @@ static inline int nm_unpack_pos(loff_t pos) {
     return (int)(pos & 0xFFFFFFFF);
 }
 
-/**** Adaptive Radix Tree Protocol ****/
-// ref: https://db.in.tum.de/~leis/papers/ART.pdf
-
-#define ART_NODE4   1
-#define ART_NODE16  2
-#define ART_NODE48  3
-#define ART_NODE256 4
-
-struct art_node {
-    u8 type;
-    u8 num_children;
-    u16 prefix_len;
-};
-
-struct art_node4 {
-    struct art_node n;
-    u8 keys[4];
-    void *children[4];
-};
-
-struct art_node16 {
-    struct art_node n;
-    u8 keys[16];
-    void *children[16];
-};
-
-struct art_node48 {
-    struct art_node n;
-    u8 child_index[256];
-    void *children[48];
-};
-
-struct art_node256 {
-    struct art_node n;
-    void *children[256];
-};
-
-#define ART_IS_LEAF(x)   ((unsigned long)(x) & 1UL)
-#define ART_GET_LEAF(x)  ((struct nomount_rule *)((unsigned long)(x) & ~1UL))
-#define ART_MAKE_LEAF(x) ((void *)((unsigned long)(x) | 1UL))
-
-static void **nm_art_find_child(struct art_node *n, u8 c)
+/** RBTree Protocol ****/
+static __always_inline struct nomount_rule *nm_tree_search_path(u32 hash, u16 len, const char *path)
 {
-    switch (n->type) {
-        case ART_NODE4: {
-            struct art_node4 *n4 = (struct art_node4 *)n;
-            for (int i = 0; i < n->num_children; i++)
-                if (n4->keys[i] == c) return &n4->children[i];
-            break;
-        }
-        case ART_NODE16: {
-            struct art_node16 *n16 = (struct art_node16 *)n;
-            void *match = memchr(n16->keys, c, n->num_children);
-            if (match) return &n16->children[(u8 *)match - n16->keys];
-            break;
-        }
-        case ART_NODE48: {
-            struct art_node48 *n48 = (struct art_node48 *)n;
-            u8 i = n48->child_index[c];
-            if (i) return &n48->children[i - 1];
-            break;
-        }
-        case ART_NODE256: {
-            struct art_node256 *n256 = (struct art_node256 *)n;
-            if (n256->children[c]) return &n256->children[c];
-            break;
-        }
-    }
-    return NULL;
-}
-
-static struct nomount_rule *nm_tree_search_path(u16 len, const char *path)
-{
-    void *node = nomount_art_root;
-    void **child;
-    int depth = 0;
-
+    struct rb_node *node = nomount_rules_tree.rb_root.rb_node;
     while (node) {
-        if (ART_IS_LEAF(node)) {
-            struct nomount_rule *r = ART_GET_LEAF(node);
-            if (likely(r->v_len == len && !memcmp(nm_get_vpath(r), path, len))) return r;
-            return NULL;
-        }
+        struct nomount_rule *r = rb_entry(node, struct nomount_rule, rb_node);
+        int cmp = (hash != r->v_hash) ? (hash < r->v_hash ? -1 : 1) :
+                  (len != r->v_len)   ? (len < r->v_len ? -1 : 1) :
+                  memcmp(path, nm_get_vpath(r), len);
 
-        struct art_node *n = node;
-        depth += n->prefix_len;
-        if (unlikely(depth > len)) return NULL;
-        child = nm_art_find_child(n, path[depth]);
-        node = child ? *child : NULL;
-        if (likely(node)) depth++;
+        if (!cmp) return r;
+        node = cmp < 0 ? node->rb_left : node->rb_right;
     }
     return NULL;
 }
 
-static struct nomount_rule *nm_tree_search_exact(u16 len, const char *path, unsigned int uid)
+static __always_inline struct nomount_rule *nm_tree_search_exact(u32 hash, u16 len, const char *path, unsigned int uid)
 {
-    struct nomount_rule *r = nm_tree_search_path(len, path);
-    while (r) {
-        if (r->target_uid == uid) return r;
-        r = r->next_uid;
+    struct rb_node *node = nomount_rules_tree.rb_root.rb_node;
+    while (node) {
+        struct nomount_rule *r = rb_entry(node, struct nomount_rule, rb_node);
+        int cmp = (hash != r->v_hash) ? (hash < r->v_hash ? -1 : 1) :
+                  (len != r->v_len)   ? (len < r->v_len ? -1 : 1) :
+                  (cmp = memcmp(path, nm_get_vpath(r), len)) ? cmp :
+                  (uid != r->target_uid) ? (uid < r->target_uid ? -1 : 1) : 0;
+
+        if (!cmp) return r;
+        node = cmp < 0 ? node->rb_left : node->rb_right;
     }
     return NULL;
 }
 
-static void nm_art_add_child(void **ref, u8 c, void *child)
+static __always_inline void nm_tree_insert(struct nomount_rule *new_rule)
 {
-    void *node = *ref;
-    struct art_node *n = node;
+    struct rb_node **link = &nomount_rules_tree.rb_root.rb_node, *parent = NULL;
+    bool leftmost = true;
+    while (*link) {
+        parent = *link;
+        struct nomount_rule *r = rb_entry(parent, struct nomount_rule, rb_node);
+        int cmp = (new_rule->v_hash != r->v_hash) ? (new_rule->v_hash < r->v_hash ? -1 : 1) :
+                  (new_rule->v_len != r->v_len)   ? (new_rule->v_len < r->v_len ? -1 : 1) :
+                  (cmp = memcmp(nm_get_vpath(new_rule), nm_get_vpath(r), new_rule->v_len)) ? cmp :
+                  (new_rule->target_uid != r->target_uid) ? (new_rule->target_uid < r->target_uid ? -1 : 1) : 0;
 
-    if (n->type == ART_NODE4) {
-        struct art_node4 *n4 = (struct art_node4 *)n;
-        if (n->num_children < 4) {
-            n4->keys[n->num_children] = c;
-            n4->children[n->num_children] = child;
-            n->num_children++;
-            return;
-        }
-
-        struct art_node16 *n16 = kzalloc(sizeof(*n16), GFP_KERNEL);
-        n16->n = n4->n;
-        n16->n.type = ART_NODE16;
-        memcpy(n16->keys, n4->keys, 4);
-        for (int i = 0; i < 4; i++)
-            n16->children[i] = n4->children[i];
-        n16->keys[4] = c;
-        n16->children[4] = child;
-        n16->n.num_children++;
-        *ref = n16;
-        kfree(n4);
-    } else if (n->type == ART_NODE16) {
-        struct art_node16 *n16 = (struct art_node16 *)n;
-        if (n->num_children < 16) {
-            n16->keys[n->num_children] = c;
-            n16->children[n->num_children] = child;
-            n->num_children++;
-            return;
-        }
-
-        struct art_node48 *n48 = kzalloc(sizeof(*n48), GFP_KERNEL);
-        n48->n = n16->n;
-        n48->n.type = ART_NODE48;
-        for (int i = 0; i < 16; i++) {
-            n48->child_index[n16->keys[i]] = i + 1;
-            n48->children[i] = n16->children[i];
-        }
-        n48->child_index[c] = 17;
-        n48->children[16] = child;
-        n48->n.num_children++;
-        *ref = n48;
-        kfree(n16);
-    } else if (n->type == ART_NODE48) {
-        struct art_node48 *n48 = (struct art_node48 *)n;
-        if (n->num_children < 48) {
-            int pos = 0;
-            while (n48->children[pos]) pos++;
-            n48->child_index[c] = pos + 1;
-            n48->children[pos] = child;
-            n->num_children++;
-            return;
-        }
-
-        struct art_node256 *n256 = kzalloc(sizeof(*n256), GFP_KERNEL);
-        n256->n = n48->n;
-        n256->n.type = ART_NODE256;
-        for (int i = 0; i < 256; i++) {
-            if (n48->child_index[i])
-                n256->children[i] = n48->children[n48->child_index[i] - 1];
-        }
-        n256->children[c] = child;
-        n256->n.num_children++;
-        *ref = n256;
-        kfree(n48);
-    } else if (n->type == ART_NODE256) {
-        struct art_node256 *n256 = (struct art_node256 *)n;
-        n256->children[c] = child;
-        n256->n.num_children++;
+        link = cmp < 0 ? &parent->rb_left : (leftmost = false, &parent->rb_right);
     }
-}
-
-static void *nm_art_first_child(struct art_node *n)
-{
-    if (n->type == ART_NODE4) return ((struct art_node4 *)n)->children[0];
-    if (n->type == ART_NODE16) return ((struct art_node16 *)n)->children[0];
-    void **children = n->type == ART_NODE48 ? ((struct art_node48 *)n)->children : ((struct art_node256 *)n)->children;
-    int capacity = n->type == ART_NODE48 ? 48 : 256;
-    for (int i = 0; i < capacity; i++) if (children[i]) return children[i];
-    return NULL;
-}
-
-static struct nomount_rule *nm_art_minimum(void *node)
-{
-    while (!ART_IS_LEAF(node)) node = nm_art_first_child(node);
-    return ART_GET_LEAF(node);
-}
-
-static void nm_tree_insert(struct nomount_rule *new_rule)
-{
-    const char *key = nm_get_vpath(new_rule);
-    void **child, **node_ref = &nomount_art_root;
-    void *node;
-    int depth = 0;
-
-    list_add_tail(&new_rule->list_node, &nomount_rules_list);
-    while ((node = *node_ref)) {
-        if (ART_IS_LEAF(node)) {
-            struct nomount_rule *existing = ART_GET_LEAF(node);
-            if (existing->v_len == new_rule->v_len && !memcmp(nm_get_vpath(existing), key, new_rule->v_len)) {
-                new_rule->next_uid = existing->next_uid;
-                existing->next_uid = new_rule;
-                return;
-            }
-
-            struct art_node4 *n4 = kzalloc(sizeof(*n4), GFP_KERNEL);
-            n4->n.type = ART_NODE4;
-            n4->n.num_children = 2;
-
-            const char *existing_key = nm_get_vpath(existing);
-            int p = 0, max_cmp = min_t(int, existing->v_len, new_rule->v_len) - depth;
-            while (p < max_cmp && existing_key[depth + p] == key[depth + p]) p++;
-
-            n4->n.prefix_len = p;
-            depth += p;
-
-            n4->keys[0] = existing_key[depth];
-            n4->children[0] = node;
-            n4->keys[1] = key[depth];
-            n4->children[1] = ART_MAKE_LEAF(new_rule);
-            *node_ref = n4;
-            return;
-        }
-
-        struct art_node *n = node;
-        if (n->prefix_len > 0) {
-            struct nomount_rule *borrowed = nm_art_minimum(node);
-            const char *borrowed_key = nm_get_vpath(borrowed);
-            int p = 0, max_cmp = min_t(int, n->prefix_len, new_rule->v_len - depth);
-
-            while (p < max_cmp && borrowed_key[depth + p] == key[depth + p]) p++;
-            if (p < n->prefix_len) {
-                struct art_node4 *n4 = kzalloc(sizeof(*n4), GFP_KERNEL);
-                n4->n.type = ART_NODE4;
-                n4->n.num_children = 2;
-                n4->n.prefix_len = p;
-                n->prefix_len -= (p + 1);
-                n4->keys[0] = borrowed_key[depth + p];
-                n4->children[0] = node;
-                n4->keys[1] = key[depth + p];
-                n4->children[1] = ART_MAKE_LEAF(new_rule);
-                *node_ref = n4;
-                return;
-            }
-        }
-
-        depth += n->prefix_len;
-        if ((child = nm_art_find_child(n, key[depth]))) {
-            node_ref = child;
-            depth++;
-        } else {
-            nm_art_add_child(node_ref, key[depth], ART_MAKE_LEAF(new_rule));
-            return;
-        }
-    }
-    *node_ref = ART_MAKE_LEAF(new_rule);
-}
-
-static void nm_art_free_tree(void *node)
-{
-    if (!node || ART_IS_LEAF(node)) return;
-
-    struct art_node *n = node;
-    if (n->type == ART_NODE4) {
-        struct art_node4 *n4 = (struct art_node4 *)n;
-        for (int i = 0; i < n->num_children; i++) nm_art_free_tree(n4->children[i]);
-    } else if (n->type == ART_NODE16) {
-        struct art_node16 *n16 = (struct art_node16 *)n;
-        for (int i = 0; i < n->num_children; i++) nm_art_free_tree(n16->children[i]);
-    } else if (n->type == ART_NODE48) {
-        struct art_node48 *n48 = (struct art_node48 *)n;
-        for (int i = 0; i < 256; i++) {
-            if (n48->child_index[i]) nm_art_free_tree(n48->children[n48->child_index[i] - 1]);
-        }
-    } else if (n->type == ART_NODE256) {
-        struct art_node256 *n256 = (struct art_node256 *)n;
-        for (int i = 0; i < 256; i++) {
-            if (n256->children[i]) nm_art_free_tree(n256->children[i]);
-        }
-    }
-    kfree(n);
-}
-
-static void nm_art_remove_child(void **parent_ref, void **child_ref, u8 key)
-{
-    struct art_node *n = *parent_ref;
-    int last = --n->num_children;
-
-    if (n->type == ART_NODE4) {
-        struct art_node4 *n4 = (struct art_node4 *)n;
-        int pos = child_ref - n4->children;
-        n4->keys[pos] = n4->keys[last];
-        n4->children[pos] = n4->children[last];
-    } else if (n->type == ART_NODE16) {
-        struct art_node16 *n16 = (struct art_node16 *)n;
-        int pos = child_ref - n16->children;
-        n16->keys[pos] = n16->keys[last];
-        n16->children[pos] = n16->children[last];
-    } else if (n->type == ART_NODE48) {
-        ((struct art_node48 *)n)->child_index[key] = 0;
-    }
-
-    if (n->num_children == 1) {
-        void *child = nm_art_first_child(n);
-        if (!ART_IS_LEAF(child))
-            ((struct art_node *)child)->prefix_len += n->prefix_len + 1;
-        *parent_ref = child;
-        kfree(n);
-    }
-}
-
-static void nm_art_remove_leaf(void **ref, struct nomount_rule *target)
-{
-    void *node;
-    void **parent_ref = NULL;
-    const char *key = nm_get_vpath(target);
-    int depth = 0;
-
-    while ((node = *ref)) {
-        if (ART_IS_LEAF(node)) {
-            struct nomount_rule *r = ART_GET_LEAF(node);
-            if (r->v_len == target->v_len && !memcmp(nm_get_vpath(r), key, target->v_len)) {
-                if (r == target) {
-                    if (target->next_uid) *ref = ART_MAKE_LEAF(target->next_uid);
-                    else {
-                        *ref = NULL;
-                        if (parent_ref) nm_art_remove_child(parent_ref, ref, key[depth - 1]);
-                    }
-                } else {
-                    struct nomount_rule *prev = r;
-                    while (prev->next_uid && prev->next_uid != target) prev = prev->next_uid;
-                    if (prev->next_uid == target) prev->next_uid = target->next_uid;
-                }
-            }
-            return;
-        }
-
-        struct art_node *n = node;
-        depth += n->prefix_len;
-        if (depth > target->v_len) return;
-        parent_ref = ref;
-        ref = nm_art_find_child(n, key[depth]);
-        if (!ref) return;
-        depth++;
-    }
-}
-
-/* --- UIDs Array RCU Management --- */
-static inline int nm_uid_add(uid_t target)
-{
-    struct nm_uid_array *old, *new_arr;
-    int count = 0;
-    if ((old = rcu_dereference_protected(nomount_uids, lockdep_is_held(&nomount_rwsem)))) {
-        for (int i = 0; i < (count = old->count); i++) if (old->uids[i] == target) return -EEXIST;
-    }
-
-    if (!(new_arr = kmalloc(sizeof(*new_arr) + (count + 1) * sizeof(uid_t), GFP_KERNEL))) return -ENOMEM;
-    new_arr->count = count + 1;
-    if (old) memcpy(new_arr->uids, old->uids, count * sizeof(uid_t));
-    new_arr->uids[count] = target;
-    rcu_assign_pointer(nomount_uids, new_arr);
-    if (old) kfree_rcu(old, rcu);
-    return 0;
-}
-
-static inline int nm_uid_del(uid_t target)
-{
-    struct nm_uid_array *old, *new_arr = NULL;
-    int count, target_idx = -1;
-
-    if (!(old = rcu_dereference_protected(nomount_uids, lockdep_is_held(&nomount_rwsem)))) return -ENOENT;
-    for (int i = 0; i < (count = old->count); i++) if (old->uids[i] == target) { target_idx = i; break; }
-    if (target_idx < 0) return -ENOENT;
-
-    if (count > 1) {
-        if (!(new_arr = kmalloc(sizeof(*new_arr) + (count - 1) * sizeof(uid_t), GFP_KERNEL))) return -ENOMEM;
-        new_arr->count = count - 1;
-        if (target_idx > 0) memcpy(new_arr->uids, old->uids, target_idx * sizeof(uid_t));
-        if (target_idx < count - 1) memcpy(new_arr->uids + target_idx, old->uids + target_idx + 1, (count - target_idx - 1) * sizeof(uid_t));
-    }
-    rcu_assign_pointer(nomount_uids, new_arr);
-    kfree_rcu(old, rcu);
-    return 0;
+    rb_link_node(&new_rule->rb_node, parent, link);
+    rb_insert_color_cached(&new_rule->rb_node, &nomount_rules_tree, leftmost);
 }
 
 /* ============================ */
@@ -647,10 +295,6 @@ struct nm_del_hdr {
     #define FLAGS_VAL /* Nothing */
 #endif
 
-#ifndef DCACHE_DONTCACHE
-# define DCACHE_DONTCACHE 0
-#endif
-
 static inline void nm_sync_inode_times(struct inode *v_inode, struct inode *r_inode)
 {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
@@ -680,43 +324,6 @@ static inline int nm_call_iterate(struct file *file, struct dir_context *ctx, co
         return fop->iterate(file, ctx);
 #endif
     return -ENOTDIR;
-}
-
-static inline struct dentry *nm_hash_and_lookup(struct dentry *dir, struct qstr *n) {
-    n->hash = full_name_hash(dir, n->name, n->len);
-    return (unlikely(dir->d_flags & DCACHE_OP_HASH) && dir->d_op->d_hash(dir, n) < 0) ? NULL : d_lookup(dir, n);
-}
-
-static inline struct nm_iop *nm_get_nm_iop(const struct inode_operations *iop) {
-    if (likely(iop) && iop->lookup == nomount_hijacked_lookup)
-        return container_of(iop, struct nm_iop, fake_iop);
-    return NULL;
-}
-
-static inline struct nm_fop *nm_get_nm_fop(const struct file_operations *fop) {
-    if (unlikely(!fop)) return NULL;
-    if (fop->iterate_shared == nomount_hijacked_iterate_dir)
-        return container_of(fop, struct nm_fop, fake_fop);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
-    if (fop->iterate == nomount_hijacked_iterate_dir)
-        return container_of(fop, struct nm_fop, fake_fop);
-#endif
-    return NULL;
-}
-
-static inline struct nm_sop *nm_get_nm_sop(const struct super_operations *sop) {
-    if (likely(sop) && sop->destroy_inode == nomount_hijacked_destroy_inode)
-        return container_of(sop, struct nm_sop, fake_sop);
-    return NULL;
-}
-
-#define NM_DOP_INITIALIZING ((const struct dentry_operations *)1L)
-static inline const struct dentry_operations *nm_get_orig_dops(struct nm_iop *iop)
-{
-    const struct dentry_operations *dops;
-    if (!iop) return NULL;
-    dops = smp_load_acquire(&iop->orig_dops);
-    return (dops == NM_DOP_INITIALIZING) ? NULL : dops;
 }
 
 #endif /* _LINUX_NOMOUNT_H */

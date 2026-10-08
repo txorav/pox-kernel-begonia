@@ -22,7 +22,7 @@
 #include "hook/syscall_hook.h"
 #include "hook/syscall_event_bridge.h"
 
-#if defined(CONFIG_KRETPROBES) && LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)
+#ifdef CONFIG_KRETPROBES
 
 static struct kretprobe *init_kretprobe(const char *name, kretprobe_handler_t handler)
 {
@@ -126,7 +126,7 @@ void __init ksu_syscall_hook_manager_init(void)
     int ret;
     pr_info("hook_manager: ksu_hook_manager_init called\n");
 
-#if defined(CONFIG_KRETPROBES) && LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)
+#ifdef CONFIG_KRETPROBES
     syscall_regfunc_rp = init_kretprobe("syscall_regfunc", syscall_regfunc_handler);
     syscall_unregfunc_rp = init_kretprobe("syscall_unregfunc", syscall_unregfunc_handler);
 #endif
@@ -134,12 +134,13 @@ void __init ksu_syscall_hook_manager_init(void)
     // Register syscall hooks via dispatcher
     ksu_register_syscall_hook(__NR_setresuid, ksu_hook_setresuid);
     ksu_register_syscall_hook(__NR_execve, ksu_hook_execve);
+    ksu_register_syscall_hook(__NR_execveat, ksu_hook_execveat);
     ksu_register_syscall_hook(__NR_newfstatat, ksu_hook_newfstatat);
     ksu_register_syscall_hook(__NR_faccessat, ksu_hook_faccessat);
 
 #ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS
-    ret = register_trace_sys_enter(ksu_sys_enter_handler, NULL);
-#if !defined(CONFIG_KRETPROBES) || LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0)
+    ret = register_trace_prio_sys_enter(ksu_sys_enter_handler, NULL, INT_MIN);
+#ifndef CONFIG_KRETPROBES
     ksu_mark_running_process_locked();
 #endif
     if (ret) {
@@ -151,7 +152,6 @@ void __init ksu_syscall_hook_manager_init(void)
 
     ksu_setuid_hook_init();
     ksu_sucompat_init();
-    ksu_avc_spoof_init();
 }
 
 void __exit ksu_syscall_hook_manager_exit(void)
@@ -163,13 +163,14 @@ void __exit ksu_syscall_hook_manager_exit(void)
     pr_info("hook_manager: sys_enter tracepoint unregistered\n");
 #endif
 
-#if defined(CONFIG_KRETPROBES) && LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)
+#ifdef CONFIG_KRETPROBES
     destroy_kretprobe(&syscall_regfunc_rp);
     destroy_kretprobe(&syscall_unregfunc_rp);
 #endif
 
     ksu_unregister_syscall_hook(__NR_setresuid);
     ksu_unregister_syscall_hook(__NR_execve);
+    ksu_unregister_syscall_hook(__NR_execveat);
     ksu_unregister_syscall_hook(__NR_newfstatat);
     ksu_unregister_syscall_hook(__NR_faccessat);
 
@@ -177,5 +178,4 @@ void __exit ksu_syscall_hook_manager_exit(void)
 
     ksu_sucompat_exit();
     ksu_setuid_hook_exit();
-    ksu_avc_spoof_exit();
 }

@@ -8,7 +8,7 @@
 #include <linux/string.h>
 
 #include "infra/symbol_resolver.h"
-#include "hook/lsm_hook.h"
+#include "hook/lsm_hook_magic.h"
 #include "hook/patch_memory.h"
 #include "klog.h" // IWYU pragma: keep
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
@@ -453,12 +453,12 @@ void ksu_unregister_lsm_hook(struct ksu_lsm_hook *hook)
     ksu_lsm_unhook(hook);
 }
 
-void __init ksu_lsm_hook_init(void)
+void __init ksu_lsm_hook_magic_init(void)
 {
     pr_info("lsm_hook: init, tracked hooks=%d\n", READ_ONCE(ksu_lsm_hook_count));
 }
 
-void __exit ksu_lsm_hook_exit(void)
+void __exit ksu_lsm_hook_magic_exit(void)
 {
     struct ksu_lsm_hook *hooks[ARRAY_SIZE(ksu_lsm_hook_entries)];
     int count;
