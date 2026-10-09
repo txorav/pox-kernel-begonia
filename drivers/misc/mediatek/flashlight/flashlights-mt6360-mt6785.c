@@ -855,14 +855,17 @@ int pox_torch_brightness_set(int value)
 		return -ENODEV;
 	}
 
-	/* Anti-strobe: rapid toggling at max current overheats MT6360
-	 * and risks LED degradation. 20ms is invisible to users. */
-	if (value > 0 && last_set_jiffies &&
-	    time_before(jiffies, last_set_jiffies + msecs_to_jiffies(20)))
-		return -EBUSY;
-	last_set_jiffies = jiffies;
-
 	mutex_lock(&pox_torch_lock);
+
+	/* Anti-strobe: rapid toggling overheats MT6360 and risks LED degradation.
+	 * 20ms floor prevents seizure-inducing frequencies (>50Hz).
+	 * Enforced under mutex across all threads and state transitions. */
+	if (last_set_jiffies &&
+	    time_before(jiffies, last_set_jiffies + msecs_to_jiffies(20))) {
+		mutex_unlock(&pox_torch_lock);
+		return -EBUSY;
+	}
+	last_set_jiffies = jiffies;
 
 	if (value <= 0) {
 		cancel_delayed_work(&pox_torch_timeout_work);
@@ -919,6 +922,10 @@ static ssize_t torchbrightness_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t size)
 {
 	int value;
+	int ret;
+
+	if (size >= 16)
+		return -EINVAL;
 
 	if (kstrtoint(buf, 0, &value))
 		return -EINVAL;
@@ -927,7 +934,9 @@ static ssize_t torchbrightness_store(struct device *dev,
 	else if (value > 255)
 		value = 255;
 
-	pox_torch_brightness_set(value);
+	ret = pox_torch_brightness_set(value);
+	if (ret < 0)
+		return ret;
 
 	return size;
 }

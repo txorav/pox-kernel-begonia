@@ -1753,27 +1753,46 @@ static inline bool is_rootless_allowed_node(struct inode *inode, struct common_a
 	}
 
 	if (dentry && dentry->d_name.name) {
-		name = dentry->d_name.name;
+		const char *name = dentry->d_name.name;
+		if (strcmp(name, "torchbrightness") == 0 ||
+		    strcmp(name, "torch_brightness") == 0 ||
+		    strcmp(name, "flashlight_brightness") == 0 ||
+		    strcmp(name, "torch_info") == 0) {
+			struct dentry *p = READ_ONCE(dentry->d_parent);
+			if (p && p->d_name.name &&
+			    (strcmp(p->d_name.name, "perfmgr") == 0 ||
+			     strcmp(p->d_name.name, "flashlight") == 0 ||
+			     strcmp(p->d_name.name, "mt6360_pmu_rgb") == 0 ||
+			     strcmp(p->d_name.name, "leds") == 0))
+				return true;
+		}
 	} else {
 		/* Lockless RCU lookup of dentry alias when adp is NULL (e.g. inode_permission) */
 		struct dentry *d;
+		bool allowed = false;
 
 		rcu_read_lock();
 		hlist_for_each_entry_rcu(d, &inode->i_dentry, d_u.d_alias) {
 			if (d && d->d_name.name) {
-				name = d->d_name.name;
-				break;
+				const char *n = d->d_name.name;
+				if (strcmp(n, "torchbrightness") == 0 ||
+				    strcmp(n, "torch_brightness") == 0 ||
+				    strcmp(n, "flashlight_brightness") == 0 ||
+				    strcmp(n, "torch_info") == 0) {
+					struct dentry *p = READ_ONCE(d->d_parent);
+					if (p && p->d_name.name &&
+					    (strcmp(p->d_name.name, "perfmgr") == 0 ||
+					     strcmp(p->d_name.name, "flashlight") == 0 ||
+					     strcmp(p->d_name.name, "mt6360_pmu_rgb") == 0 ||
+					     strcmp(p->d_name.name, "leds") == 0)) {
+						allowed = true;
+						break;
+					}
+				}
 			}
 		}
 		rcu_read_unlock();
-	}
-
-	if (name) {
-		if (strcmp(name, "torchbrightness") == 0 ||
-		    strcmp(name, "torch_brightness") == 0 ||
-		    strcmp(name, "flashlight_brightness") == 0 ||
-		    strcmp(name, "torch_info") == 0)
-			return true;
+		return allowed;
 	}
 
 	return false;

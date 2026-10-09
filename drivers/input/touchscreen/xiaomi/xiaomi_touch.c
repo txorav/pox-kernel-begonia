@@ -1,6 +1,7 @@
 #define pr_fmt(fmt)	"[MI_TOUCH][%s:%d]" fmt, __func__, __LINE__
 
 #include "xiaomi_touch.h"
+#include <linux/capability.h>
 
 static struct xiaomi_touch_pdata *touch_pdata;
 int mi_log_level;
@@ -445,8 +446,14 @@ static ssize_t touch_game_mode_show(struct device *dev, struct device_attribute 
 static ssize_t touch_game_mode_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
 	int val = 0;
-	if (sscanf(buf, "%d", &val) < 1)
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	if (kstrtoint(buf, 10, &val) < 0)
 		return -EINVAL;
+	if (val < 0)
+		val = 0;
 	pox_touch_game_mode_set(val);
 	return count;
 }
@@ -459,14 +466,20 @@ static ssize_t touch_sensitivity_show(struct device *dev, struct device_attribut
 static ssize_t touch_sensitivity_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
 	int val = 0;
-	if (sscanf(buf, "%d", &val) < 1)
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	if (kstrtoint(buf, 10, &val) < 0)
 		return -EINVAL;
+	if (val < 0)
+		val = 0;
 	pox_touch_sensitivity_set(val);
 	return count;
 }
 
-static DEVICE_ATTR(touch_game_mode, 0664, touch_game_mode_show, touch_game_mode_store);
-static DEVICE_ATTR(touch_sensitivity, 0664, touch_sensitivity_show, touch_sensitivity_store);
+static DEVICE_ATTR(touch_game_mode, 0644, touch_game_mode_show, touch_game_mode_store);
+static DEVICE_ATTR(touch_sensitivity, 0644, touch_sensitivity_show, touch_sensitivity_store);
 
 static struct attribute *touch_attr_group[] = {
 	&dev_attr_palm_sensor.attr,

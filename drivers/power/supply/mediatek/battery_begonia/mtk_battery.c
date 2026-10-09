@@ -39,6 +39,7 @@
 #include <linux/kthread.h>	/* For Kthread_run */
 #include <linux/platform_device.h>	/* platform device */
 #include <linux/time.h>
+#include <linux/capability.h>
 
 #include <linux/netlink.h>	/* netlink */
 #include <linux/kernel.h>
@@ -1329,6 +1330,9 @@ static ssize_t store_Battery_Temperature(
 {
 	signed int temp;
 
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
 	if (kstrtoint(buf, 10, &temp) == 0) {
 
 		gm.fixed_bat_tmp = temp;
@@ -1354,7 +1358,7 @@ static ssize_t store_Battery_Temperature(
 	return size;
 }
 
-static DEVICE_ATTR(Battery_Temperature, 0664, show_Battery_Temperature,
+static DEVICE_ATTR(Battery_Temperature, 0644, show_Battery_Temperature,
 		   store_Battery_Temperature);
 
 static ssize_t show_UI_SOC(
@@ -1373,6 +1377,9 @@ static ssize_t store_UI_SOC(
 {
 	signed int temp;
 
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
 	if (kstrtoint(buf, 10, &temp) == 0) {
 
 		gm.fixed_uisoc = temp;
@@ -1387,7 +1394,7 @@ static ssize_t store_UI_SOC(
 	return size;
 }
 
-static DEVICE_ATTR(UI_SOC, 0664, show_UI_SOC,
+static DEVICE_ATTR(UI_SOC, 0644, show_UI_SOC,
 		   store_UI_SOC);
 
 
@@ -3184,6 +3191,9 @@ static ssize_t store_FG_daemon_disable(
 	struct device *dev, struct device_attribute *attr,
 					const char *buf, size_t size)
 {
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
 	bm_err("[disable FG daemon]\n");
 	disable_fg();
 	if (gm.disableGM30 == true)
@@ -3192,7 +3202,7 @@ static ssize_t store_FG_daemon_disable(
 	return size;
 }
 static DEVICE_ATTR(
-	FG_daemon_disable, 0664,
+	FG_daemon_disable, 0644,
 	show_FG_daemon_disable, store_FG_daemon_disable);
 
 static ssize_t show_FG_meter_resistance(
@@ -3210,6 +3220,9 @@ static ssize_t store_FG_meter_resistance(
 {
 	unsigned long val = 0;
 	int ret;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
 	bm_err("[%s]\n", __func__);
 
@@ -3236,7 +3249,7 @@ static ssize_t store_FG_meter_resistance(
 
 }
 static DEVICE_ATTR(
-	FG_meter_resistance, 0664,
+	FG_meter_resistance, 0644,
 	show_FG_meter_resistance, store_FG_meter_resistance);
 
 static ssize_t show_FG_nafg_disable(
@@ -3252,6 +3265,9 @@ static ssize_t store_FG_nafg_disable(
 {
 	unsigned long val = 0;
 	int ret;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
 	bm_err("[%s]\n", __func__);
 
@@ -3285,7 +3301,7 @@ static ssize_t store_FG_nafg_disable(
 	return size;
 }
 static DEVICE_ATTR(
-	disable_nafg, 0664,
+	disable_nafg, 0644,
 	show_FG_nafg_disable, store_FG_nafg_disable);
 
 static ssize_t show_FG_ntc_disable_nafg(
@@ -3301,6 +3317,9 @@ static ssize_t store_FG_ntc_disable_nafg(
 {
 	unsigned long val = 0;
 	int ret;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
 	bm_err("[%s]\n",  __func__);
 
@@ -3338,7 +3357,7 @@ static ssize_t store_FG_ntc_disable_nafg(
 	return size;
 }
 static DEVICE_ATTR(
-	ntc_disable_nafg, 0664,
+	ntc_disable_nafg, 0644,
 	show_FG_ntc_disable_nafg, store_FG_ntc_disable_nafg);
 
 
@@ -3357,6 +3376,9 @@ static ssize_t store_uisoc_update_type(
 {
 	unsigned long val = 0;
 	int ret;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
 	bm_err("[%s]\n", __func__);
 
@@ -3391,7 +3413,7 @@ static ssize_t store_uisoc_update_type(
 
 	return size;
 }
-static DEVICE_ATTR(uisoc_update_type, 0664,
+static DEVICE_ATTR(uisoc_update_type, 0644,
 	show_uisoc_update_type, store_uisoc_update_type);
 
 static ssize_t show_FG_daemon_log_level(
@@ -3415,6 +3437,9 @@ static ssize_t store_FG_daemon_log_level(
 {
 	unsigned long val = 0;
 	int ret;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
 	bm_err("[FG_daemon_log_level]\n");
 
@@ -3450,7 +3475,7 @@ static ssize_t store_FG_daemon_log_level(
 	}
 	return size;
 }
-static DEVICE_ATTR(FG_daemon_log_level, 0664,
+static DEVICE_ATTR(FG_daemon_log_level, 0644,
 	show_FG_daemon_log_level, store_FG_daemon_log_level);
 
 static ssize_t show_shutdown_cond_enable(
@@ -3513,6 +3538,9 @@ static ssize_t store_reset_battery_cycle(
 	unsigned long val = 0;
 	int ret;
 
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
 	bm_err("[%s]\n", __func__);
 	if (buf != NULL && size != 0) {
 		bm_err("[%s] buf is %s\n",
@@ -3540,7 +3568,7 @@ static ssize_t store_reset_battery_cycle(
 	return size;
 }
 static DEVICE_ATTR(
-	reset_battery_cycle, 0664,
+	reset_battery_cycle, 0644,
 	show_reset_battery_cycle, store_reset_battery_cycle);
 
 static ssize_t show_reset_aging_factor(
@@ -3558,6 +3586,9 @@ static ssize_t store_reset_aging_factor(
 {
 	unsigned long val = 0;
 	int ret;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
 	bm_err("[%s]\n", __func__);
 	if (buf != NULL && size != 0) {
@@ -3588,7 +3619,7 @@ static ssize_t store_reset_aging_factor(
 }
 
 static DEVICE_ATTR(
-	reset_aging_factor, 0664,
+	reset_aging_factor, 0644,
 	show_reset_aging_factor, store_reset_aging_factor);
 
 
@@ -3606,6 +3637,9 @@ static ssize_t store_BAT_EC(
 {
 	int ret1 = 0, ret2 = 0;
 	char cmd_buf[4], param_buf[16];
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
 	bm_err("%s\n", __func__);
 	cmd_buf[3] = '\0';
@@ -3648,7 +3682,7 @@ static ssize_t store_BAT_EC(
 
 	return size;
 }
-static DEVICE_ATTR(BAT_EC, 0664, show_BAT_EC, store_BAT_EC);
+static DEVICE_ATTR(BAT_EC, 0644, show_BAT_EC, store_BAT_EC);
 
 static ssize_t show_FG_Battery_CurrentConsumption(
 struct device *dev, struct device_attribute *attr,
@@ -3854,6 +3888,9 @@ static long adc_cali_ioctl(
 	int adc_out_data[2] = { 1, 1 };
 	int temp_car_tune;
 	int isdisNAFG = 0;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
 	bm_debug("%s enter\n", __func__);
 	mutex_lock(&gm.fg_mutex);
