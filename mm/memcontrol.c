@@ -4088,7 +4088,8 @@ static void memcg_xswapd_work_func(struct work_struct *work)
 			nr = try_to_free_mem_cgroup_pages(memcg, batch, GFP_KERNEL, true);
 		} else {
 			lru_add_drain_all();
-			nr = batch;
+			nr = 0;
+			break;
 		}
 
 		total_reclaimed += nr;

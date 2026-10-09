@@ -216,22 +216,22 @@ static void pox_memory_preset(int mode)
 {
 	if (mode > 0) {
 		vm_swappiness = 100;
-		watermark_scale_factor = 150;
+		watermark_scale_factor = 200;
 		sysctl_vfs_cache_pressure = 50;
 		page_cluster = 0;
 		vm_dirty_ratio = 10;
 		dirty_background_ratio = 5;
 	} else if (mode == GAMING_MODE_POWERSAVE) {
 		vm_swappiness = 60;
-		watermark_scale_factor = 50;
+		watermark_scale_factor = 100;
 		sysctl_vfs_cache_pressure = 100;
 		page_cluster = 0;
 		vm_dirty_ratio = 20;
 		dirty_background_ratio = 10;
 	} else {
 		vm_swappiness = 100;
-		watermark_scale_factor = 100;
-		sysctl_vfs_cache_pressure = 75;
+		watermark_scale_factor = 150;
+		sysctl_vfs_cache_pressure = 50;
 		page_cluster = 0;
 		vm_dirty_ratio = 20;
 		dirty_background_ratio = 10;
@@ -699,12 +699,15 @@ static ssize_t gaming_mode_proc_write(struct file *file, const char __user *ubuf
 		return count;
 	} else if (strcasecmp(buf, "manual") == 0) {
 		pox_pwr_auto = 0;
-		cancel_delayed_work(&pox_dynamic_work);
+		cancel_delayed_work_sync(&pox_dynamic_work);
 		return count;
 	} else {
 		if (kstrtoint(buf, 10, &val) < 0)
 			return -EINVAL;
 	}
+
+	if (val < GAMING_MODE_POWERSAVE || val > GAMING_MODE_EXTREME)
+		return -EINVAL;
 
 	pox_gaming_hint(val);
 	return count;
@@ -882,6 +885,9 @@ static ssize_t hbm_mode_proc_write(struct file *file, const char __user *ubuf,
 		if (kstrtoint(buf, 10, &val) < 0)
 			return -EINVAL;
 	}
+
+	if (val < HBM_MODE_OFF || val > HBM_MODE_L3)
+		return -EINVAL;
 
 	hbm_mode_set(val);
 	return count;
@@ -1186,13 +1192,13 @@ static ssize_t gaming_mode_sysfs_store(struct kobject *kobj,
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	if (sscanf(buf, "%d", &val) != 1)
+	if (kstrtoint(buf, 10, &val) < 0)
 		return -EINVAL;
 
-	if (val < 0)
-		val = 0;
-	else if (val > 2)
-		val = 2;
+	if (val < GAMING_MODE_POWERSAVE)
+		val = GAMING_MODE_POWERSAVE;
+	else if (val > GAMING_MODE_EXTREME)
+		val = GAMING_MODE_EXTREME;
 
 	pox_gaming_hint(val);
 	return count;
@@ -1275,7 +1281,10 @@ static ssize_t hbm_mode_sysfs_store(struct kobject *kobj,
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	if (sscanf(buf, "%d", &val) != 1)
+	if (kstrtoint(buf, 10, &val) < 0)
+		return -EINVAL;
+
+	if (val < HBM_MODE_OFF || val > HBM_MODE_L3)
 		return -EINVAL;
 
 	hbm_mode_set(val);
@@ -1412,7 +1421,10 @@ static ssize_t battery_bypass_proc_write(struct file *file, const char __user *b
 		return -EFAULT;
 	buf[count] = '\0';
 
-	if (sscanf(buf, "%d", &val) != 1)
+	if (kstrtoint(buf, 10, &val) < 0)
+		return -EINVAL;
+
+	if (val < 0 || val > 1)
 		return -EINVAL;
 
 	pox_battery_bypass_set(val);
@@ -1453,7 +1465,10 @@ static ssize_t battery_limit_proc_write(struct file *file, const char __user *bu
 		return -EFAULT;
 	buf[count] = '\0';
 
-	if (sscanf(buf, "%d", &val) != 1)
+	if (kstrtoint(buf, 10, &val) < 0)
+		return -EINVAL;
+
+	if (val < 0 || val > 100)
 		return -EINVAL;
 
 	pox_battery_limit_set(val);
@@ -1520,7 +1535,10 @@ static ssize_t touch_game_mode_proc_write(struct file *file, const char __user *
 		return -EFAULT;
 	buf[count] = '\0';
 
-	if (sscanf(buf, "%d", &val) != 1)
+	if (kstrtoint(buf, 10, &val) < 0)
+		return -EINVAL;
+
+	if (val < 0 || val > 1)
 		return -EINVAL;
 
 	pox_touch_game_mode_set(val);
@@ -1561,7 +1579,10 @@ static ssize_t touch_sensitivity_proc_write(struct file *file, const char __user
 		return -EFAULT;
 	buf[count] = '\0';
 
-	if (sscanf(buf, "%d", &val) != 1)
+	if (kstrtoint(buf, 10, &val) < 0)
+		return -EINVAL;
+
+	if (val < 0 || val > 3)
 		return -EINVAL;
 
 	pox_touch_sensitivity_set(val);
@@ -1606,7 +1627,10 @@ static ssize_t headphone_gain_proc_write(struct file *file, const char __user *b
 		return -EFAULT;
 	buf[count] = '\0';
 
-	if (sscanf(buf, "%d", &val) != 1)
+	if (kstrtoint(buf, 10, &val) < 0)
+		return -EINVAL;
+
+	if (val < 0 || val > 8)
 		return -EINVAL;
 
 	pox_headphone_gain_set(val);
@@ -1651,7 +1675,10 @@ static ssize_t vibrator_strength_proc_write(struct file *file, const char __user
 		return -EFAULT;
 	buf[count] = '\0';
 
-	if (sscanf(buf, "%d", &val) != 1)
+	if (kstrtoint(buf, 10, &val) < 0)
+		return -EINVAL;
+
+	if (val < 0 || val > 13)
 		return -EINVAL;
 
 	pox_vibrator_strength_set(val);
@@ -1696,7 +1723,10 @@ static ssize_t wakelock_blocker_proc_write(struct file *file, const char __user 
 		return -EFAULT;
 	buf[count] = '\0';
 
-	if (sscanf(buf, "%d", &val) != 1)
+	if (kstrtoint(buf, 10, &val) < 0)
+		return -EINVAL;
+
+	if (val < 0 || val > 1)
 		return -EINVAL;
 
 	pox_wakelock_blocker_set(val);
@@ -1741,7 +1771,10 @@ static ssize_t fast_charge_proc_write(struct file *file, const char __user *buff
 		return -EFAULT;
 	buf[count] = '\0';
 
-	if (sscanf(buf, "%d", &val) != 1)
+	if (kstrtoint(buf, 10, &val) < 0)
+		return -EINVAL;
+
+	if (val < 0 || val > 1)
 		return -EINVAL;
 
 	pox_fast_charge_set(val);
@@ -1786,7 +1819,10 @@ static ssize_t dt2w_proc_write(struct file *file, const char __user *buffer,
 		return -EFAULT;
 	buf[count] = '\0';
 
-	if (sscanf(buf, "%d", &val) != 1)
+	if (kstrtoint(buf, 10, &val) < 0)
+		return -EINVAL;
+
+	if (val < 0 || val > 1)
 		return -EINVAL;
 
 	pox_dt2w_set(val);
@@ -1831,7 +1867,10 @@ static ssize_t mic_gain_proc_write(struct file *file, const char __user *buffer,
 		return -EFAULT;
 	buf[count] = '\0';
 
-	if (sscanf(buf, "%d", &val) != 1)
+	if (kstrtoint(buf, 10, &val) < 0)
+		return -EINVAL;
+
+	if (val < 0 || val > 4)
 		return -EINVAL;
 
 	pox_mic_gain_set(val);
@@ -1876,7 +1915,10 @@ static ssize_t dynamic_fsync_proc_write(struct file *file, const char __user *bu
 		return -EFAULT;
 	buf[count] = '\0';
 
-	if (sscanf(buf, "%d", &val) != 1)
+	if (kstrtoint(buf, 10, &val) < 0)
+		return -EINVAL;
+
+	if (val < 0 || val > 1)
 		return -EINVAL;
 
 	pox_dynamic_fsync_set(val);

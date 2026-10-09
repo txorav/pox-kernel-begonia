@@ -822,8 +822,8 @@ static int sugov_init(struct cpufreq_policy *policy)
 		goto stop_kthread;
 	}
 
-	/* iOS-grade instantaneous ramp-up (500us) with anti-jitter down-hold (10ms) */
-	tunables->up_rate_limit_us = 500;
+	/* Instantaneous interactive ramp-up (250us) with anti-jitter down-hold (10ms) */
+	tunables->up_rate_limit_us = 250;
 	tunables->down_rate_limit_us = 10000;
 
 	policy->governor_data = sg_policy;

@@ -53,11 +53,12 @@
  *
  * (to see the precise effective timeslice length of your workload,
  *  run vmstat and monitor the context-switches (cs) field)
-/*
- * (default: 4ms unscaled, units: nanoseconds)
  */
-unsigned int sysctl_sched_latency			= 4000000ULL;
-unsigned int normalized_sysctl_sched_latency		= 4000000ULL;
+/*
+ * (default: 3ms unscaled, units: nanoseconds)
+ */
+unsigned int sysctl_sched_latency			= 3000000ULL;
+unsigned int normalized_sysctl_sched_latency		= 3000000ULL;
 
 /*
  * Enable/disable honoring sync flag in energy-aware wakeups.
@@ -90,15 +91,15 @@ enum sched_tunable_scaling sysctl_sched_tunable_scaling = SCHED_TUNABLESCALING_N
 /*
  * Minimal preemption granularity for CPU-bound tasks:
  *
- * (default: 0.5 msec unscaled, units: nanoseconds)
+ * (default: 0.3 msec unscaled, units: nanoseconds)
  */
-unsigned int sysctl_sched_min_granularity		= 500000ULL;
-unsigned int normalized_sysctl_sched_min_granularity	= 500000ULL;
+unsigned int sysctl_sched_min_granularity		= 300000ULL;
+unsigned int normalized_sysctl_sched_min_granularity	= 300000ULL;
 
 /*
  * This value is kept at sysctl_sched_latency/sysctl_sched_min_granularity
  */
-static unsigned int sched_nr_latency = 8;
+static unsigned int sched_nr_latency = 10;
 
 /*
  * After fork, child runs first. If set to 0 (default) then
@@ -113,10 +114,10 @@ unsigned int sysctl_sched_child_runs_first __read_mostly;
  * and reduces their over-scheduling. Synchronous workloads will still
  * have immediate wakeup/sleep latencies.
  *
- * (default: 0.5 msec unscaled, units: nanoseconds)
+ * (default: 0.25 msec unscaled, units: nanoseconds)
  */
-unsigned int sysctl_sched_wakeup_granularity		= 500000UL;
-unsigned int normalized_sysctl_sched_wakeup_granularity	= 500000UL;
+unsigned int sysctl_sched_wakeup_granularity		= 250000UL;
+unsigned int normalized_sysctl_sched_wakeup_granularity	= 250000UL;
 
 const_debug unsigned int sysctl_sched_migration_cost	= 250000UL;
 
@@ -8640,6 +8641,16 @@ wakeup_preempt_entity(struct sched_entity *curr, struct sched_entity *se)
 		return -1;
 
 	gran = wakeup_gran(curr, se);
+
+	/*
+	 * Dynamic I/O & Interactive Priority Boosting (Windows NT & FreeBSD ULE heuristic):
+	 * When a task is waking up from an I/O wait (e.g. touch/display event,
+	 * binder IPC, audio, or network packet), cut wakeup granularity by half
+	 * so latency-sensitive interactive tasks immediately preempt compute tasks.
+	 */
+	if (entity_is_task(se) && task_of(se)->in_iowait)
+		gran >>= 1;
+
 	if (vdiff > gran)
 		return 1;
 
