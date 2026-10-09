@@ -426,13 +426,13 @@ if [ -d "\$RAMDISK" ]; then
     cat << 'RC_EOF' > \$RAMDISK/init.memory_enhanced.rc
 # Pox adaptive memory (HarmonyOS EROFS-cache + MGLRU lesson, 4.14-safe):
 # - swappiness 100: anon -> per-CPU zstd ZRAM (no LMK kills, 85% fewer kills lesson)
-# - watermark 100: 1% early kswapd fits 8.3ms frame budget (gaming raises to 150, powersave drops to 50)
+# - watermark 150: early kswapd fits 8.3ms frame budget (gaming raises to 200, powersave drops to 100)
 # - page-cluster 0: no swap readahead (ZRAM random; readahead wastes CPU/RAM)
 # - vfs pressure 50: retain dentries for instant launch (EROFS block-cache lesson)
 # - dirty 20/10: throughput (gaming tightens to 10/5 for latency)
 # Kernel gaming_mode switches these per-mode; boot sets balanced baseline.
 on boot
-    write /proc/sys/vm/watermark_scale_factor 100
+    write /proc/sys/vm/watermark_scale_factor 150
     write /proc/sys/vm/page-cluster 0
     write /proc/sys/vm/vfs_cache_pressure 50
     write /proc/sys/vm/swappiness 100
@@ -441,6 +441,12 @@ on boot
     write /proc/sys/vm/dirty_expire_centisecs 1500
     write /proc/sys/vm/dirty_writeback_centisecs 300
     write /proc/sys/vm/stat_interval 10
+
+    # Advanced CFS & Interactivity Tunables (FreeBSD ULE / Windows NT Dynamic Boost)
+    write /proc/sys/kernel/sched_latency_ns 3000000
+    write /proc/sys/kernel/sched_min_granularity_ns 300000
+    write /proc/sys/kernel/sched_wakeup_granularity_ns 250000
+    write /proc/sys/kernel/sched_sync_hint_enable 1
 
     # Low-latency high-throughput networking & Fair Queueing for BBR
     write /proc/sys/net/core/default_qdisc fq
@@ -458,7 +464,8 @@ on boot
 
 on property:sys.boot_completed=1
     write /sys/block/zram0/comp_algorithm zstd
-    write /proc/sys/vm/watermark_scale_factor 100
+    write /sys/block/zram0/max_comp_streams 8
+    write /proc/sys/vm/watermark_scale_factor 150
     write /proc/sys/vm/page-cluster 0
     write /proc/sys/vm/vfs_cache_pressure 50
     write /proc/sys/vm/swappiness 100
@@ -467,6 +474,9 @@ on property:sys.boot_completed=1
     write /proc/sys/vm/dirty_expire_centisecs 1500
     write /proc/sys/vm/dirty_writeback_centisecs 300
     write /proc/sys/vm/stat_interval 10
+    write /proc/sys/kernel/sched_latency_ns 3000000
+    write /proc/sys/kernel/sched_min_granularity_ns 300000
+    write /proc/sys/kernel/sched_wakeup_granularity_ns 250000
     write /proc/sys/net/core/default_qdisc fq
     write /proc/sys/net/ipv4/tcp_congestion_control bbr
     write /proc/sys/net/ipv4/tcp_autocorking 0
@@ -561,22 +571,38 @@ on boot
     write /sys/block/sdc/queue/read_ahead_kb 128
     write /sys/block/mmcblk0/queue/read_ahead_kb 128
 
-    # Flash storage queue tuning: allow bio request merging and enable affinity
+    # Flash storage queue tuning: mq-deadline flash tuning, allow bio request merging and enable affinity
+    write /sys/block/sda/queue/scheduler mq-deadline
+    write /sys/block/sda/queue/iosched/read_expire 250
+    write /sys/block/sda/queue/iosched/write_expire 1500
+    write /sys/block/sda/queue/iosched/fifo_batch 8
     write /sys/block/sda/queue/rq_affinity 2
     write /sys/block/sda/queue/iostats 0
     write /sys/block/sda/queue/add_random 0
     write /sys/block/sda/queue/nomerges 0
     write /sys/block/sda/queue/nr_requests 128
+    write /sys/block/sdb/queue/scheduler mq-deadline
+    write /sys/block/sdb/queue/iosched/read_expire 250
+    write /sys/block/sdb/queue/iosched/write_expire 1500
+    write /sys/block/sdb/queue/iosched/fifo_batch 8
     write /sys/block/sdb/queue/rq_affinity 2
     write /sys/block/sdb/queue/iostats 0
     write /sys/block/sdb/queue/add_random 0
     write /sys/block/sdb/queue/nomerges 0
     write /sys/block/sdb/queue/nr_requests 128
+    write /sys/block/sdc/queue/scheduler mq-deadline
+    write /sys/block/sdc/queue/iosched/read_expire 250
+    write /sys/block/sdc/queue/iosched/write_expire 1500
+    write /sys/block/sdc/queue/iosched/fifo_batch 8
     write /sys/block/sdc/queue/rq_affinity 2
     write /sys/block/sdc/queue/iostats 0
     write /sys/block/sdc/queue/add_random 0
     write /sys/block/sdc/queue/nomerges 0
     write /sys/block/sdc/queue/nr_requests 128
+    write /sys/block/mmcblk0/queue/scheduler mq-deadline
+    write /sys/block/mmcblk0/queue/iosched/read_expire 250
+    write /sys/block/mmcblk0/queue/iosched/write_expire 1500
+    write /sys/block/mmcblk0/queue/iosched/fifo_batch 8
     write /sys/block/mmcblk0/queue/rq_affinity 2
     write /sys/block/mmcblk0/queue/iostats 0
     write /sys/block/mmcblk0/queue/add_random 0

@@ -216,22 +216,22 @@ static void pox_memory_preset(int mode)
 {
 	if (mode > 0) {
 		vm_swappiness = 100;
-		watermark_scale_factor = 150;
+		watermark_scale_factor = 200;
 		sysctl_vfs_cache_pressure = 50;
 		page_cluster = 0;
 		vm_dirty_ratio = 10;
 		dirty_background_ratio = 5;
 	} else if (mode == GAMING_MODE_POWERSAVE) {
 		vm_swappiness = 60;
-		watermark_scale_factor = 50;
+		watermark_scale_factor = 100;
 		sysctl_vfs_cache_pressure = 100;
 		page_cluster = 0;
 		vm_dirty_ratio = 20;
 		dirty_background_ratio = 10;
 	} else {
 		vm_swappiness = 100;
-		watermark_scale_factor = 100;
-		sysctl_vfs_cache_pressure = 75;
+		watermark_scale_factor = 150;
+		sysctl_vfs_cache_pressure = 50;
 		page_cluster = 0;
 		vm_dirty_ratio = 20;
 		dirty_background_ratio = 10;
