@@ -27,7 +27,6 @@
 #include <linux/cdev.h>
 #include <linux/uaccess.h>
 #include <linux/mutex.h>
-#include <linux/capability.h>
 #include <linux/of.h>
 #include <linux/list.h>
 #include <linux/errno.h>
@@ -1025,9 +1024,6 @@ static ssize_t flashlight_strobe_store(struct device *dev,
 	char delim[] = " ";
 	char *token, *cur = (char *)buf;
 	int ret;
-
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
 
 	pr_debug("Strobe store\n");
 

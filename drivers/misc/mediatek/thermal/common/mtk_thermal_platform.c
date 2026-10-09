@@ -23,7 +23,6 @@
 #include <linux/proc_fs.h>
 #include <linux/err.h>
 #include <linux/syscalls.h>
-#include <linux/capability.h>
 #include <linux/time.h>
 #include <linux/string.h>
 #include <linux/mutex.h>
@@ -380,12 +379,9 @@ static ssize_t mtk_thermal_validation_wr
 	int check_switch;
 	int len = 0;
 
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
 	len = (count < (sizeof(desc) - 1)) ? count : (sizeof(desc) - 1);
 	if (copy_from_user(desc, buffer, len))
-		return -EFAULT;
+		return 0;
 
 	desc[len] = '\0';
 

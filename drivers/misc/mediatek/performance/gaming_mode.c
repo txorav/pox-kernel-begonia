@@ -964,11 +964,7 @@ static ssize_t torch_brightness_proc_write(struct file *file, const char __user 
 		return -EBUSY;
 	last_jiffies = jiffies;
 
-	{
-		int ret = torch_brightness_set(val);
-		if (ret < 0)
-			return ret;
-	}
+	torch_brightness_set(val);
 	return count;
 }
 
@@ -1326,11 +1322,7 @@ static ssize_t torch_brightness_sysfs_store(struct kobject *kobj,
 		return -EBUSY;
 	last_jiffies_sysfs = jiffies;
 
-	{
-		int ret = torch_brightness_set(val);
-		if (ret < 0)
-			return ret;
-	}
+	torch_brightness_set(val);
 	return count;
 }
 

@@ -22,7 +22,6 @@
 #include <linux/input.h>
 #include <linux/delay.h>
 #include <linux/sched.h>
-#include <linux/capability.h>
 #include <mt-plat/eas_ctrl.h>
 
 #include "tchbst.h"
@@ -159,9 +158,6 @@ static ssize_t perfmgr_tb_enable_write(struct file *filp, const char *ubuf,
 	int ret;
 	unsigned long flags;
 
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
 	if (cnt >= sizeof(buf))
 		return -EINVAL;
 
@@ -210,9 +206,6 @@ static ssize_t perfmgr_tb_core_write(struct file *filp, const char *ubuf,
 	int ret;
 	unsigned long flags;
 
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
 	if (cnt >= sizeof(buf))
 		return -EINVAL;
 
@@ -260,9 +253,6 @@ static ssize_t perfmgr_tb_freq_write(struct file *filp, const char *ubuf,
 	unsigned long val;
 	int ret;
 	unsigned long flags;
-
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
 
 	if (cnt >= sizeof(buf))
 		return -EINVAL;
@@ -421,20 +411,20 @@ int init_ktch(struct proc_dir_entry *parent)
 	if (!ktch_root)
 		pr_debug("ktch_root not create\n");
 	/* touch */
-	tbe_dir = proc_create("tb_enable", 0644, ktch_root,
+	tbe_dir = proc_create("tb_enable", 0666, ktch_root,
 			&perfmgr_tb_enable_fops);
 	if (!tbe_dir)
 		pr_debug("tbe_dir not create\n");
-	tbc_dir = proc_create("tb_core", 0644, ktch_root,
+	tbc_dir = proc_create("tb_core", 0666, ktch_root,
 			&perfmgr_tb_core_fops);
 	if (!tbc_dir)
 		pr_debug("tbc_dir not create\n");
 
-	tbf_dir = proc_create("tb_freq", 0644, ktch_root,
+	tbf_dir = proc_create("tb_freq", 0666, ktch_root,
 			&perfmgr_tb_freq_fops);
 	if (!tbf_dir)
 		pr_debug("tbf_dir not create\n");
-	tbclstr_dir = proc_create("tb_clstr", 0644, ktch_root,
+	tbclstr_dir = proc_create("tb_clstr", 0666, ktch_root,
 			&perfmgr_tb_clstr_fops);
 	if (!tbclstr_dir)
 		pr_debug("tbclstr_dir not create\n");

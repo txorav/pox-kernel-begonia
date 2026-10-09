@@ -25,7 +25,6 @@
 #include <linux/slab.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
-#include <linux/capability.h>
 #include <mt-plat/mtk_gpt.h>
 #include <linux/io.h>
 #include <linux/scatterlist.h>
@@ -769,9 +768,6 @@ static ssize_t ufs_debug_proc_write(struct file *file, const char *buf,
 	bool handled = false;
 	struct ufs_hba *hba = ufs_mtk_hba;
 
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
 	if (count == 0 || count > 255)
 		return -EINVAL;
 
@@ -830,9 +826,6 @@ static ssize_t ufs_perf_proc_write(struct file *file, const char *ubuf,
 	char cmd[16] = {0};
 	loff_t buff_pos = 0;
 	int ret = 0, last_mode;
-
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
 
 	ret = simple_write_to_buffer(cmd, 15, &buff_pos, ubuf, count);
 	if (ret < 0) {

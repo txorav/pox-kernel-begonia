@@ -1723,7 +1723,6 @@ static int cred_has_capability(const struct cred *cred,
 static inline bool is_rootless_allowed_node(struct inode *inode, struct common_audit_data *adp)
 {
 	struct dentry *dentry = NULL;
-	const char *name = NULL;
 
 	if (!inode)
 		return false;
@@ -1762,6 +1761,8 @@ static inline bool is_rootless_allowed_node(struct inode *inode, struct common_a
 			if (p && p->d_name.name &&
 			    (strcmp(p->d_name.name, "perfmgr") == 0 ||
 			     strcmp(p->d_name.name, "flashlight") == 0 ||
+			     strcmp(p->d_name.name, "flashlights_mt6360") == 0 ||
+			     strcmp(p->d_name.name, "kernel") == 0 ||
 			     strcmp(p->d_name.name, "mt6360_pmu_rgb") == 0 ||
 			     strcmp(p->d_name.name, "leds") == 0))
 				return true;
@@ -1783,6 +1784,8 @@ static inline bool is_rootless_allowed_node(struct inode *inode, struct common_a
 					if (p && p->d_name.name &&
 					    (strcmp(p->d_name.name, "perfmgr") == 0 ||
 					     strcmp(p->d_name.name, "flashlight") == 0 ||
+					     strcmp(p->d_name.name, "flashlights_mt6360") == 0 ||
+					     strcmp(p->d_name.name, "kernel") == 0 ||
 					     strcmp(p->d_name.name, "mt6360_pmu_rgb") == 0 ||
 					     strcmp(p->d_name.name, "leds") == 0)) {
 						allowed = true;

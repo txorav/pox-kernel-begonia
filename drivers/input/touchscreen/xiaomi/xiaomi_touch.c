@@ -447,9 +447,6 @@ static ssize_t touch_game_mode_store(struct device *dev, struct device_attribute
 {
 	int val = 0;
 
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
 	if (kstrtoint(buf, 10, &val) < 0)
 		return -EINVAL;
 	if (val < 0)
@@ -467,19 +464,18 @@ static ssize_t touch_sensitivity_store(struct device *dev, struct device_attribu
 {
 	int val = 0;
 
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
 	if (kstrtoint(buf, 10, &val) < 0)
 		return -EINVAL;
 	if (val < 0)
 		val = 0;
+	if (val > 2)
+		val = 2;
 	pox_touch_sensitivity_set(val);
 	return count;
 }
 
-static DEVICE_ATTR(touch_game_mode, 0644, touch_game_mode_show, touch_game_mode_store);
-static DEVICE_ATTR(touch_sensitivity, 0644, touch_sensitivity_show, touch_sensitivity_store);
+static DEVICE_ATTR(touch_game_mode, 0664, touch_game_mode_show, touch_game_mode_store);
+static DEVICE_ATTR(touch_sensitivity, 0664, touch_sensitivity_show, touch_sensitivity_store);
 
 static struct attribute *touch_attr_group[] = {
 	&dev_attr_palm_sensor.attr,

@@ -38,7 +38,6 @@
 #include <linux/interrupt.h>
 #include <linux/spinlock.h>
 #include <linux/platform_device.h>
-#include <linux/capability.h>
 #include <linux/device.h>
 #include <linux/kdev_t.h>
 #include <linux/fs.h>
@@ -1277,9 +1276,6 @@ static ssize_t store_pe20(struct device *dev, struct device_attribute *attr,
 	struct charger_manager *pinfo = dev->driver_data;
 	signed int temp;
 
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
 	if (kstrtoint(buf, 10, &temp) == 0) {
 		if (temp == 0)
 			pinfo->enable_pe_2 = false;
@@ -1292,7 +1288,7 @@ static ssize_t store_pe20(struct device *dev, struct device_attribute *attr,
 	return size;
 }
 
-static DEVICE_ATTR(pe20, 0644, show_pe20, store_pe20);
+static DEVICE_ATTR(pe20, 0664, show_pe20, store_pe20);
 
 /* pump express series end*/
 
@@ -1309,9 +1305,6 @@ static ssize_t store_charger_log_level(struct device *dev,
 	unsigned long val = 0;
 	int ret;
 
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
 	chr_err("%s\n", __func__);
 
 	if (buf != NULL && size != 0) {
@@ -1326,7 +1319,7 @@ static ssize_t store_charger_log_level(struct device *dev,
 	}
 	return size;
 }
-static DEVICE_ATTR(charger_log_level, 0644, show_charger_log_level,
+static DEVICE_ATTR(charger_log_level, 0664, show_charger_log_level,
 		store_charger_log_level);
 
 static ssize_t show_pdc_max_watt_level(struct device *dev,
@@ -3168,9 +3161,6 @@ static ssize_t store_input_current(struct device *dev,
 	unsigned int reg = 0;
 	int ret;
 
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
 	pr_debug("[Battery] %s\n", __func__);
 	if (buf != NULL && size != 0) {
 		pr_debug("[Battery] buf is %s and size is %zu\n", buf, size);
@@ -3183,7 +3173,7 @@ static ssize_t store_input_current(struct device *dev,
 	}
 	return size;
 }
-static DEVICE_ATTR(input_current, 0644, show_input_current,
+static DEVICE_ATTR(input_current, 0664, show_input_current,
 		store_input_current);
 
 static ssize_t show_chg1_current(struct device *dev,
@@ -3204,9 +3194,6 @@ static ssize_t store_chg1_current(struct device *dev,
 	unsigned int reg = 0;
 	int ret;
 
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
 	pr_debug("[Battery] %s\n", __func__);
 	if (buf != NULL && size != 0) {
 		pr_debug("[Battery] buf is %s and size is %zu\n", buf, size);
@@ -3217,7 +3204,7 @@ static ssize_t store_chg1_current(struct device *dev,
 	}
 	return size;
 }
-static DEVICE_ATTR(chg1_current, 0644, show_chg1_current, store_chg1_current);
+static DEVICE_ATTR(chg1_current, 0664, show_chg1_current, store_chg1_current);
 
 static ssize_t show_chg2_current(struct device *dev,
 		struct device_attribute *attr, char *buf)
@@ -3237,9 +3224,6 @@ static ssize_t store_chg2_current(struct device *dev,
 	unsigned int reg = 0;
 	int ret;
 
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
 	pr_debug("[Battery] %s\n", __func__);
 	if (buf != NULL && size != 0) {
 		pr_debug("[Battery] buf is %s and size is %zu\n", buf, size);
@@ -3250,7 +3234,7 @@ static ssize_t store_chg2_current(struct device *dev,
 	}
 	return size;
 }
-static DEVICE_ATTR(chg2_current, 0644, show_chg2_current, store_chg2_current);
+static DEVICE_ATTR(chg2_current, 0664, show_chg2_current, store_chg2_current);
 
 static ssize_t show_BatNotify(struct device *dev,
 		struct device_attribute *attr, char *buf)
@@ -3269,9 +3253,6 @@ static ssize_t store_BatNotify(struct device *dev,
 	unsigned int reg = 0;
 	int ret;
 
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
 	pr_debug("[Battery] store_BatteryNotify\n");
 	if (buf != NULL && size != 0) {
 		pr_debug("[Battery] buf is %s and size is %zu\n", buf, size);
@@ -3283,7 +3264,7 @@ static ssize_t store_BatNotify(struct device *dev,
 	return size;
 }
 
-static DEVICE_ATTR(BatteryNotify, 0644, show_BatNotify, store_BatNotify);
+static DEVICE_ATTR(BatteryNotify, 0664, show_BatNotify, store_BatNotify);
 
 static ssize_t show_BN_TestMode(struct device *dev,
 		struct device_attribute *attr, char *buf)
@@ -3301,9 +3282,6 @@ static ssize_t store_BN_TestMode(struct device *dev,
 	unsigned int reg = 0;
 	int ret;
 
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
 	pr_debug("[Battery] %s\n", __func__);
 	if (buf != NULL && size != 0) {
 		pr_debug("[Battery] buf is %s and size is %zu\n", buf, size);
@@ -3313,7 +3291,7 @@ static ssize_t store_BN_TestMode(struct device *dev,
 	}
 	return size;
 }
-static DEVICE_ATTR(BN_TestMode, 0644, show_BN_TestMode, store_BN_TestMode);
+static DEVICE_ATTR(BN_TestMode, 0664, show_BN_TestMode, store_BN_TestMode);
 
 static ssize_t show_ADC_Charger_Voltage(struct device *dev,
 		struct device_attribute *attr, char *buf)
@@ -3469,10 +3447,6 @@ static ssize_t bypass_mode_store(struct kobject *kobj, struct kobj_attribute *at
 				  const char *buf, size_t count)
 {
 	int val = 0;
-
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
 	if (kstrtoint(buf, 10, &val) == 0) {
 		g_battery_bypass_mode = (val != 0) ? 1 : 0;
 		if (pinfo)
@@ -3490,10 +3464,6 @@ static ssize_t charge_limit_store(struct kobject *kobj, struct kobj_attribute *a
 				   const char *buf, size_t count)
 {
 	int val = 0;
-
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
 	if (kstrtoint(buf, 10, &val) == 0) {
 		if (val <= 0 || val >= 100)
 			val = 100;
@@ -3518,10 +3488,6 @@ static ssize_t thermal_guard_store(struct kobject *kobj, struct kobj_attribute *
 				    const char *buf, size_t count)
 {
 	int val = 0;
-
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
 	if (kstrtoint(buf, 10, &val) == 0) {
 		g_battery_thermal_guard = (val != 0) ? 1 : 0;
 		if (pinfo)
@@ -3539,10 +3505,6 @@ static ssize_t temp_limit_store(struct kobject *kobj, struct kobj_attribute *att
 				 const char *buf, size_t count)
 {
 	int val = 0;
-
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
 	if (kstrtoint(buf, 10, &val) == 0) {
 		if (val < 30) val = 30;
 		if (val > 55) val = 55;
@@ -3643,13 +3605,13 @@ static ssize_t battery_protect_temp_show(struct kobject *kobj, struct kobj_attri
 }
 
 static struct kobj_attribute bypass_mode_kattr =
-	__ATTR(bypass_mode, 0644, bypass_mode_show, bypass_mode_store);
+	__ATTR(bypass_mode, 0664, bypass_mode_show, bypass_mode_store);
 static struct kobj_attribute charge_limit_kattr =
-	__ATTR(charge_limit, 0644, charge_limit_show, charge_limit_store);
+	__ATTR(charge_limit, 0664, charge_limit_show, charge_limit_store);
 static struct kobj_attribute thermal_guard_kattr =
-	__ATTR(thermal_guard, 0644, thermal_guard_show, thermal_guard_store);
+	__ATTR(thermal_guard, 0664, thermal_guard_show, thermal_guard_store);
 static struct kobj_attribute temp_limit_kattr =
-	__ATTR(temp_limit, 0644, temp_limit_show, temp_limit_store);
+	__ATTR(temp_limit, 0664, temp_limit_show, temp_limit_store);
 static struct kobj_attribute status_kattr =
 	__ATTR(status, 0444, battery_protect_status_show, NULL);
 static struct kobj_attribute soc_kattr =

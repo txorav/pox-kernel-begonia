@@ -511,18 +511,16 @@ on boot
     # accessible so DACs/serial/ethernet/iPhone tethering just work.
     chmod 0755 /dev/bus/usb
     chmod 0666 /dev/bus/usb/*/* 2>/dev/null || true
-    chown root system /dev/ttyUSB0 /dev/ttyUSB1 /dev/ttyUSB2 /dev/ttyUSB3 2>/dev/null || true
-    chmod 0660 /dev/ttyUSB0 /dev/ttyUSB1 /dev/ttyUSB2 /dev/ttyUSB3 2>/dev/null || true
-    chown root system /dev/ttyACM0 /dev/ttyACM1 2>/dev/null || true
-    chmod 0660 /dev/ttyACM0 /dev/ttyACM1 2>/dev/null || true
-    chmod 0644 /proc/ktch/tb_enable 2>/dev/null || true
-    chmod 0644 /proc/ktch/tb_core 2>/dev/null || true
-    chmod 0644 /proc/ktch/tb_freq 2>/dev/null || true
-    chmod 0644 /proc/ktch/tb_clstr 2>/dev/null || true
+    chmod 0666 /dev/ttyUSB0
+    chmod 0666 /dev/ttyUSB1
+    chmod 0666 /dev/ttyUSB2
+    chmod 0666 /dev/ttyUSB3
+    chmod 0666 /dev/ttyACM0
+    chmod 0666 /dev/ttyACM1
     chmod 0644 /proc/perfmgr/touch_game_mode
     chmod 0644 /proc/perfmgr/touch_sensitivity
-    chmod 0644 /sys/class/touch/touch_dev/touch_game_mode
-    chmod 0644 /sys/class/touch/touch_dev/touch_sensitivity
+    chmod 0664 /sys/class/touch/touch_dev/touch_game_mode
+    chmod 0664 /sys/class/touch/touch_dev/touch_sensitivity
     chmod 0644 /proc/perfmgr/headphone_gain
     chmod 0644 /sys/kernel/sound_control/headphone_gain
     chmod 0644 /proc/perfmgr/mic_gain
