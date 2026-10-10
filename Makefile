@@ -723,7 +723,7 @@ ifeq ($(cc-name),gcc)
 KBUILD_CFLAGS	+= -mcpu=cortex-a76.cortex-a55 -mtune=cortex-a76.cortex-a55
 endif
 ifeq ($(cc-name),clang)
-KBUILD_CFLAGS	+= -mcpu=cortex-a55 -mtune=cortex-a55
+KBUILD_CFLAGS	+= -mcpu=cortex-a55 -mtune=cortex-a76
 
 ifdef CONFIG_LLVM_POLLY
 KBUILD_CFLAGS	+= -mllvm -polly \
@@ -740,16 +740,9 @@ endif
 endif
 
 ifdef CONFIG_INLINE_OPTIMIZATION
-KBUILD_CFLAGS	+= -mllvm -inline-threshold=2000
-KBUILD_CFLAGS	+= -mllvm -inlinehint-threshold=3000
-KBUILD_CFLAGS   += -mllvm -unroll-threshold=1200
-endif
-
-ifdef CONFIG_INLINE_OPTIMIZATION
-KBUILD_CFLAGS  += -mllvm -inline-threshold=1300
-KBUILD_CFLAGS  += -mllvm -inlinehint-threshold=2000
-KBUILD_CFLAGS  += -mllvm -unroll-threshold=900
-KBUILD_LDFLAGS  += --plugin-opt=-import-instr-limit=40
+KBUILD_CFLAGS	+= -mllvm -inline-threshold=1500 \
+		   -mllvm -inlinehint-threshold=2500 \
+		   -mllvm -unroll-threshold=1000
 endif
 
 # Tell gcc to never replace conditional load with a non-conditional one
