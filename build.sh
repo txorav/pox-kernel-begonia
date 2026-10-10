@@ -158,10 +158,9 @@ prepare_config() {
     fi
 
     if ! "$KERDEVDEP/clang/bin/clang" --target=aarch64-linux-gnu \
-        -mllvm -unroll-threshold=1200 -mllvm -unroll-threshold=900 \
-        -mllvm -inline-threshold=2000 -mllvm -inline-threshold=1300 \
+        -mllvm -unroll-threshold=1000 -mllvm -inline-threshold=1500 \
         -c "$test_src" -o /dev/null 2>/dev/null; then
-        log "Toolchain rejects repeated -mllvm thresholds - disabling CONFIG_INLINE_OPTIMIZATION"
+        log "Toolchain rejects -mllvm thresholds - disabling CONFIG_INLINE_OPTIMIZATION"
         ./scripts/config --file "$OUT_DIR/.config" --disable INLINE_OPTIMIZATION
     fi
 
