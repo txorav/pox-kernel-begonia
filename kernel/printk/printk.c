@@ -2162,6 +2162,11 @@ asmlinkage int vprintk_emit(int facility, int level,
 			    const char *dict, size_t dictlen,
 			    const char *fmt, va_list args)
 {
+#ifdef CONFIG_SULTAN_NO_LOGS
+	/* Sultan: Drop non-critical kernel logs to eliminate formatting jitter and console locks */
+	if (level > LOGLEVEL_CRIT)
+		return 0;
+#endif
 	int printed_len;
 	bool in_sched = false;
 	unsigned long flags;

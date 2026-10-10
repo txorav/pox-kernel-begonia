@@ -47,6 +47,11 @@ COMMIT_SUBJECT="$(git log -1 --format=%s 2>/dev/null || echo "Release build")"
 # Version Name / Codename (Rocks theme: Granite, Obsidian, Onyx)
 if [[ -z "${VERSION_NAME:-}" ]]; then
     case "$GIT_BRANCH" in
+        onyx-sultan-apatch*|*sultan-apatch*|*sultan*)
+            VERSION_NAME="Onyx-Sultan-APatch"
+            BRANCH_DESC="Zero Frame-Drop & Sultan Debloat APatch Edition"
+            DEFAULT_DEFCONFIG="begonia_sultan_apatch_defconfig"
+            ;;
         onyx-resukisu*|*resukisu*)
             VERSION_NAME="Onyx-ReSukiSu"
             BRANCH_DESC="Zero Frame-Drop Gaming & ReSukiSu Ultra Edition"
