@@ -15,7 +15,9 @@ extern const char linux_proc_banner[];
 
 extern char *log_buf_addr_get(void);
 extern u32 log_buf_len_get(void);
+#ifdef CONFIG_MTK_PRINTK_UART_CONSOLE
 extern bool mt_get_uartlog_status(void);
+#endif
 
 #ifdef CONFIG_MTK_AEE_FEATURE
 extern void aee_wdt_zap_locks(void);
