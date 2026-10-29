@@ -354,7 +354,7 @@ added to `c2.patch`. This is a large change — see the commit history for conte
 
 ## TODO
 
-- **Version bump to 2.0**: When the user says "were gonna release this", change `KERNEL_VERSION` in `build.sh` from `1.0` to `2.0` and update any version references in `README.md` and workflow.
+- **Version bump to 2.0**: Completed (Oct 29 2026). `KERNEL_VERSION` in `build.sh` updated to `2.0`, `README.md` and app versions aligned.
 
 ---
 

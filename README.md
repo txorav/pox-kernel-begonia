@@ -2,7 +2,7 @@
 
 [![GitHub Repo](https://img.shields.io/badge/GitHub-POX--project%2Fpox--begonia--kernel-181717.svg?logo=github)](https://github.com/POX-project/pox-begonia-kernel)
 [![Kernel Version](https://img.shields.io/badge/Kernel-Linux%204.14.357-green.svg?logo=linux)](https://github.com/POX-project/pox-begonia-kernel)
-[![Pox Release](https://img.shields.io/badge/Pox%20Release-v1.0.0--Beta-blue.svg)](https://github.com/POX-project/pox-begonia-kernel)
+[![Pox Release](https://img.shields.io/badge/Pox%20Release-v2.0-blue.svg)](https://github.com/POX-project/pox-begonia-kernel)
 [![Device](https://img.shields.io/badge/Device-Redmi%20Note%208%20Pro%20(begonia)-orange.svg?logo=xiaomi)](https://github.com/POX-project/pox-begonia-kernel)
 [![SoC](https://img.shields.io/badge/SoC-MediaTek%20Helio%20G90T%20(MT6785)-red.svg)](https://github.com/POX-project/pox-begonia-kernel)
 [![Solidarity](https://img.shields.io/badge/Stand%20With-Free%20Palestine%20🇵🇸-red?style=flat&colorA=000000&colorB=007A3D)](https://en.wikipedia.org/wiki/State_of_Palestine)
@@ -17,7 +17,7 @@
 
 > [!CAUTION]
 > ### ⚠️ Critical Disclaimer & Legacy Version Advisory
-> * **Older Versions (< 1.0.0-Beta / v0.9 & Prior) are OLD & TESTING ONLY**: All releases prior to **1.0.0-Beta** (including v0.9 and earlier tags) are strictly classified as **OLD, DEPRECATED, AND FOR HISTORICAL / TESTING PURPOSES ONLY**. They lack essential hardware overcurrent protection, stability hotfixes, and vendor HAL data abort immunizations.
+> * **Older Versions (< 2.0 / v0.9 & Prior) are OLD & TESTING ONLY**: All releases prior to **2.0** (including v0.9 and earlier tags) are strictly classified as **OLD, DEPRECATED, AND FOR HISTORICAL / TESTING PURPOSES ONLY**. They lack essential hardware overcurrent protection, stability hotfixes, and vendor HAL data abort immunizations.
 > * **NO LIABILITY / WARRANTY DISCLAIMER**: We are **NOT responsible** for anything that happens to you, your device, bricked motherboards, hardware brownouts, bootloops, data loss, or failed alarms. You flash completely at your own risk.
 > * **FOLLOW MAINLINE**: For daily driving and stability, always **follow mainline** and only install active supported releases from the current branch matrix (`onyx`, `onyx-sultan-apatch`, etc.). Never flash obsolete, unmaintained legacy builds.
 
@@ -26,9 +26,9 @@
 ## Table of Contents
 
 - [Overview & Hardware Specifications](#overview--hardware-specifications)
-- [Release Evolution: 0.9 Legacy to 1.0.0-Beta Mainline](#release-evolution-09-legacy-to-100-beta-mainline)
+- [Release Evolution: 0.9 Legacy to 2.0 Mainline](#release-evolution-09-legacy-to-20-mainline)
   - [Version 0.9 (Legacy / Testing Only - Deprecated)](#1-version-09-legacy--testing-only---deprecated)
-  - [Version 1.0.0-Beta (Mainline / Active Supported)](#2-version-100-beta-mainline--active-supported)
+  - [Version 2.0 (Mainline / Active Supported)](#2-version-20-mainline--active-supported)
 - [Rock Editions & The 6-Branch Matrix](#rock-editions--the-6-branch-matrix)
 - [Comprehensive Kernel Addons & Features](#comprehensive-kernel-addons--features)
   - [1. Universal Filesystem & Storage Engine](#1-universal-filesystem--storage-engine)
@@ -66,7 +66,7 @@
 
 ---
 
-## Release Evolution: 0.9 Legacy to 1.0.0-Beta Mainline
+## Release Evolution: 0.9 Legacy to 2.0 Mainline
 
 ### 1. Version 0.9 (Legacy / Testing Only - Deprecated)
 > **STATUS: OBSOLETE & TESTING ONLY.** Do not use for daily driving. Follow mainline.
@@ -80,10 +80,10 @@ The 0.9 series introduced the initial prototype Rock Editions:
 
 ---
 
-### 2. Version 1.0.0-Beta (Mainline / Active Supported)
+### 2. Version 2.0 (Mainline / Active Supported)
 > **STATUS: CURRENT RECOMMENDED MAINLINE RELEASE.**
 
-The 1.0.0-Beta release upgrades Pox Kernel into a modern downstream distribution across the confirmed 6-branch matrix:
+The 2.0 release upgrades Pox Kernel into a modern downstream distribution:
 * **Universal Filesystem Engine**: Integrated EROFS, modernized F2FS with rapid garbage collection, Btrfs with ZSTD compression and subvolumes, native NTFS (read/write), exFAT, and FAT32.
 * **18W Fast Charging + Safe 500mA PC USB**: Full Pump Express 2.0 (PE+ 2.0) 3.0A/18W fast charging on AC wall adapters with strict 500mA PC USB SDP enforcement to protect host motherboards and maintain rock-solid ADB connectivity.
 * **HAL Panic Immunization**: Fully resolved Xiaomi Power HAL EL1 Data Abort crash by ensuring `sysctl_sched_migration_cost` remains writable in userspace.
@@ -208,7 +208,7 @@ adb reboot recovery
 adb shell twrp sideload
 
 # 3. Stream and install the kernel zip
-adb sideload Pox-1.0.0-Beta-Onyx-Sultan-APatch-<commit>-begonia.zip
+adb sideload Pox-2.0-Onyx-APatch-<commit>-begonia.zip
 
 # 4. Reboot system
 adb reboot
@@ -223,7 +223,7 @@ Once booted, open a terminal or run ADB shell:
 ```bash
 # 1. Verify kernel release string
 uname -a
-# Expected: Linux localhost 4.14.357-Pox-1.0.0-Beta-...
+# Expected: Linux localhost 4.14.357-Pox-2.0-...
 
 # 2. Check gaming mode status
 cat /proc/perfmgr/gaming_mode
@@ -272,19 +272,13 @@ To maintain absolute code quality and prevent regressions, all AI agents and con
 ## Project Roadmap & TODO
 
 - [x] **v0.9 Release**: Granite, Obsidian, and Onyx initial stable rollout.
-- [x] **1.0.0-Beta Core Architecture**: Universal filesystem engine (EROFS, F2FS, Btrfs, NTFS, exFAT).
+- [x] **v2.0 Core Architecture**: Universal filesystem engine (EROFS, F2FS, Btrfs, NTFS, exFAT), Sultan debloat on base, multi-root variants.
 - [x] **18W Fast Charging Engine**: AC charger current boost with safe PC USB 500mA compliance.
 - [x] **HAL Panic Fix**: Elimination of EL1 data abort on `sysctl_sched_migration_cost`.
 - [x] **Agent Governance**: Strict anti-spaghetti rules and automated quality gates in `AGENTS.md`.
 - [x] **POX-project Remote Migration**: Upstream repository forked and synced to `POX-project/pox-begonia-kernel`.
-- [ ] **Complete 6-Branch Matrix Builds**: Build and package official 1.0.0-Beta releases across all 6 targets:
-  - [x] `onyx-sultan-apatch`
-  - [ ] `onyx-apatch`
-  - [ ] `onyx-ksu-next`
-  - [ ] `onyx`
-  - [ ] `onyx-sultan`
-  - [ ] `onyx-sultan-ksu-next`
-- [ ] **Comparative Benchmark Report**: Full on-device 5-minute Perfetto traces and benchmark comparison between v0.9 baseline and 1.0.0-Beta.
+- [x] **Complete Variant Matrix Builds**: Build and package official releases across variants (`vanilla`, `apatch`, `folkpatch`, `ksu`, `miui`, `c2`).
+- [x] **Comparative Benchmark Report**: Full on-device 5-minute Perfetto traces and benchmark comparison.
 - [ ] **Network & Wi-Fi Zero-Jitter**: Wi-Fi SetCAM latency tuning and TCP BBR v2 upstream backports.
 - [ ] **Automated GitHub Actions CI**: Automated multi-branch build pipeline with release artifact generation.
 
